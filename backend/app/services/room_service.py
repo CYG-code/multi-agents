@@ -1,0 +1,54 @@
+from uuid import UUID
+from typing import Optional
+
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.room import Room, RoomStatus
+from app.models.room_member import RoomMember
+from app.schemas.room import RoomCreate
+
+
+async def create_room(db: AsyncSession, data: RoomCreate, user_id: UUID) -> Room:
+    room = Room(name=data.name, task_id=data.task_id, created_by=user_id)
+    db.add(room)
+    await db.commit()
+    await db.refresh(room)
+    return room
+
+
+async def get_rooms(db: AsyncSession, status: Optional[str] = None) -> list[Room]:
+    stmt = select(Room)
+    if status:
+        stmt = stmt.where(Room.status == status)
+    else:
+        stmt = stmt.where(Room.status != RoomStatus.ended)
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_room(db: AsyncSession, room_id: UUID) -> Optional[Room]:
+    result = await db.execute(select(Room).where(Room.id == room_id))
+    return result.scalar_one_or_none()
+
+
+async def join_room(db: AsyncSession, room_id: UUID, user_id: UUID) -> None:
+    from sqlalchemy.dialects.postgresql import insert
+    stmt = insert(RoomMember).values(room_id=room_id, user_id=user_id)
+    stmt = stmt.on_conflict_do_nothing(index_elements=["room_id", "user_id"])
+    await db.execute(stmt)
+    await db.commit()
+
+
+async def get_member_count(db: AsyncSession, room_id: UUID) -> int:
+    result = await db.execute(
+        select(func.count()).where(RoomMember.room_id == room_id)
+    )
+    return result.scalar_one()
+
+
+async def update_room_status(db: AsyncSession, room: Room, status: RoomStatus) -> Room:
+    room.status = status
+    await db.commit()
+    await db.refresh(room)
+    return room
