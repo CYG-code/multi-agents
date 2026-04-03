@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+backend/.venv/
+
+# Env
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
