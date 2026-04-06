@@ -4,14 +4,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.db.redis_client import close_redis, init_redis
 from app.routers import auth, rooms, tasks
+from app.websocket.handlers import websocket_endpoint
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # P1 阶段：数据库引擎在首次请求时自动连接
+    await init_redis()
     yield
-    # 关闭时清理资源
+    await close_redis()
 
 
 app = FastAPI(title="多智能体协作学习平台", version="1.2.0", lifespan=lifespan)
@@ -27,3 +29,4 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(rooms.router, prefix="/api/rooms", tags=["房间"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["任务"])
+app.add_api_websocket_route("/ws/{room_id}", websocket_endpoint)

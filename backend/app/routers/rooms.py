@@ -2,13 +2,16 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.models.user import User
-from app.schemas.room import RoomCreate, RoomUpdate, RoomResponse
-from app.services import room_service
 from app.dependencies import get_current_user, require_teacher
+from app.models.room_member import RoomMember
+from app.models.user import User
+from app.schemas.room import RoomCreate, RoomResponse, RoomUpdate
+from app.services import room_service
+from app.services.message_service import MessageService
 
 router = APIRouter()
 
@@ -79,3 +82,27 @@ async def update_room(
         raise HTTPException(status_code=404, detail="房间不存在")
     room = await room_service.update_room_status(db, room, data.status)
     return RoomResponse.model_validate(room)
+
+
+@router.get("/{room_id}/messages")
+async def get_messages(
+    room_id: UUID,
+    before_seq: int | None = Query(None),
+    limit: int = Query(50, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="房间不存在")
+
+    membership = await db.execute(
+        select(RoomMember.id).where(
+            RoomMember.room_id == room_id,
+            RoomMember.user_id == current_user.id,
+        )
+    )
+    if membership.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="你不是该房间成员")
+
+    return await MessageService.get_history_messages(db, str(room_id), before_seq, limit)
