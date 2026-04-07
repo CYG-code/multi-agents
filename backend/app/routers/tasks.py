@@ -1,14 +1,13 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.dependencies import get_current_user, require_teacher
-from app.models.task import Task
 from app.models.user import User
 from app.schemas.task import TaskCreate, TaskResponse
+from app.services import task_service
 
 router = APIRouter()
 
@@ -18,8 +17,8 @@ async def list_tasks(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Task))
-    return [TaskResponse.model_validate(t) for t in result.scalars().all()]
+    tasks = await task_service.list_tasks(db)
+    return [TaskResponse.model_validate(t) for t in tasks]
 
 
 @router.post("", response_model=TaskResponse, status_code=201)
@@ -28,10 +27,7 @@ async def create_task(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_teacher),
 ):
-    task = Task(**data.model_dump(), created_by=current_user.id)
-    db.add(task)
-    await db.commit()
-    await db.refresh(task)
+    task = await task_service.create_task(db, data, current_user.id)
     return TaskResponse.model_validate(task)
 
 
@@ -41,8 +37,7 @@ async def get_task(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Task).where(Task.id == task_id))
-    task = result.scalar_one_or_none()
+    task = await task_service.get_task(db, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return TaskResponse.model_validate(task)

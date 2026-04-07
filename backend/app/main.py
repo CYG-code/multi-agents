@@ -29,4 +29,11 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(rooms.router, prefix="/api/rooms", tags=["房间"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["任务"])
+if settings.debug_enabled:
+    try:
+        from app.routers import debug
+
+        app.include_router(debug.router)
+    except ImportError:
+        pass
 app.add_api_websocket_route("/ws/{room_id}", websocket_endpoint)

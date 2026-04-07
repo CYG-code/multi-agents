@@ -1,8 +1,9 @@
-import asyncio
+﻿import asyncio
 from uuid import UUID
 
 from fastapi import Depends, WebSocket, WebSocketDisconnect
 from jose import JWTError
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +11,7 @@ from app.db.redis_client import get_redis_client
 from app.db.session import get_db
 from app.models.room_member import RoomMember
 from app.models.user import User
+from app.schemas.message import ChatMessageFrame
 from app.services.auth_service import decode_access_token
 from app.services.message_service import MessageService
 from app.websocket.manager import ConnectionManager
@@ -47,8 +49,13 @@ async def is_room_member(user_id: UUID, room_id: str, db: AsyncSession) -> bool:
 
 
 async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSession) -> None:
-    content = str(data.get("content", "")).strip()
-    mentions = data.get("mentions", [])
+    try:
+        frame = ChatMessageFrame.model_validate(data)
+    except ValidationError:
+        return
+
+    content = frame.content.strip()
+    mentions = frame.mentions
 
     if not content:
         return

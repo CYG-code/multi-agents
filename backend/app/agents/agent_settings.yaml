@@ -1,0 +1,8 @@
+timing:
+  silence_threshold_seconds: 180
+  warmup_minutes: 2
+
+models:
+  role_agents:
+    model_version: "claude-3-5-sonnet-20241022"
+    history_token_budget: 6000

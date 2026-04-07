@@ -24,6 +24,7 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+.claude/settings.local.json
 
 # AI Agent 临时沙箱
 .ai_scratch/
