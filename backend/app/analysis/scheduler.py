@@ -27,6 +27,7 @@ def _load_silence_threshold_seconds() -> int:
 
 
 SILENCE_THRESHOLD_SECONDS = _load_silence_threshold_seconds()
+TRIGGER_LOCK_TTL_SECONDS = SILENCE_THRESHOLD_SECONDS + 60
 
 
 def _normalize_room_id(value) -> str:
@@ -50,7 +51,8 @@ async def check_silence():
         if silence_duration >= SILENCE_THRESHOLD_SECONDS:
             lock_key = f"trigger_lock:{room_id}:silence"
             if not await redis_client.exists(lock_key):
-                await redis_client.setex(lock_key, 60, "1")
+                # Lock at least one silence cycle to avoid repeated trigger loops.
+                await redis_client.setex(lock_key, TRIGGER_LOCK_TTL_SECONDS, "1")
                 context = await get_room_context(room_id)
                 history = await get_recent_messages(room_id)
                 asyncio.create_task(facilitator.generate_and_push(room_id, context, history))

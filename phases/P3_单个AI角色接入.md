@@ -9,7 +9,7 @@
 
 ## 一、阶段目标
 
-接入 Anthropic Claude API，实现第一个 AI 角色智能体（主持人 Facilitator）能够主动在聊天室中发言，验证完整的 AI 消息生成 → 流式推送 → 落库链路。
+接入 OpenAI 兼容 Chat Completions API（通过中转站），实现第一个 AI 角色智能体（主持人 Facilitator）能够主动在聊天室中发言，验证完整的 AI 消息生成 → 流式推送 → 落库链路。
 
 **完成标志：** 学生停止发言约 3 分钟后（演示模式可调为 30 秒），聊天区出现「主持人」打字动画，随后主持人引导性发言以打字机效果逐字出现，消息最终落库并在刷新后仍然可见。
 
@@ -20,7 +20,7 @@
 ```
 P3 分为 3 个核心链路：
 
-  A. Claude API 封装 + Facilitator Prompt 设计
+  A. OpenAI 兼容 API 封装 + Facilitator Prompt 设计
   B. AI 消息生成链路（预分配 ID → 流式生成 → 落库 → WebSocket 推送）
   C. 前端流式接收渲染（agent:stream + AgentTypingIndicator）
   D. 沉默检测 A 类触发器（触发 Facilitator）
@@ -29,45 +29,74 @@ P3 分为 3 个核心链路：
 
 ---
 
+## 评审结论修订（同步更新）
+
+1. 第 1 点严重程度由「中等」降级为「建议优化（非阻断）」。
+2. OpenAI 兼容接口（`/v1/chat/completions`）通常允许连续相同 `role`，多数中转站也可正常处理，因此不会作为阻断性问题。
+3. 仍建议将历史上下文合并为单条消息：减少 token 开销、提升跨模型/中转站稳定性、语义更清晰。
+4. 该项属于非阻断性建议，不改也能跑，但建议在本阶段完成以减少后续兼容成本。
+5. 第 2 点（沉默循环触发）仍是阻断性问题，不受 API 选择影响。
+6. 第 3-5 点结论不变，维持原判。
+
+---
+
 ## 三、详细开发步骤
 
-### 步骤 1：配置 Anthropic API Key 并封装调用工具
+### 步骤 1：配置 OpenAI 兼容 API Key 并封装调用工具
 
-**文件：** `backend/app/agents/claude_client.py`
+**文件：** `backend/app/agents/claude_client.py`（建议后续更名为 `llm_client.py`）
 
 ```python
-import anthropic
+from openai import AsyncOpenAI
 from app.config import settings
 
-# 全局单例 Anthropic 客户端
-_client: anthropic.AsyncAnthropic = None
+# 全局单例 OpenAI 兼容客户端
+_client: AsyncOpenAI = None
 
-def get_claude_client() -> anthropic.AsyncAnthropic:
+def get_llm_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        _client = AsyncOpenAI(
+            base_url=settings.OPENAI_BASE_URL,  # 例如: https://yunwu.ai/v1
+            api_key=settings.OPENAI_API_KEY
+        )
     return _client
 
 async def stream_completion(
-    system_prompt: str,
     messages: list[dict],
-    model: str = "claude-3-5-sonnet-20241022",
+    model: str = "selected_model_name",
     max_tokens: int = 1024,
 ):
     """
     封装流式调用，返回异步生成器，每次 yield 一个 token 字符串。
     调用方负责处理异常。
     """
-    client = get_claude_client()
-    
-    async with client.messages.stream(
+    client = get_llm_client()
+
+    stream = await client.chat.completions.create(
         model=model,
-        max_tokens=max_tokens,
-        system=system_prompt,
         messages=messages,
-    ) as stream:
-        async for text in stream.text_stream:
-            yield text
+        max_tokens=max_tokens,
+        stream=True
+    )
+
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+async def one_shot_completion(
+    messages: list[dict],
+    model: str = "selected_model_name",
+):
+    """非流式调用示例：使用 choices[0].message.content 取结果"""
+    client = get_llm_client()
+    resp = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=False
+    )
+    return resp.choices[0].message.content
 ```
 
 ---
@@ -121,7 +150,7 @@ async def stream_completion(
 1. 预分配 message_id（UUID）
 2. 写入 status=streaming 的消息记录
 3. 通过 WebSocket 广播 agent:typing（is_typing=true）
-4. 调用 Claude API 流式生成
+4. 调用 OpenAI 兼容接口流式生成
 5. 每个 token → 广播 agent:stream 事件
 6. 生成完毕 → 更新数据库记录 status=ok / failed
 7. 广播 agent:stream_end 事件
@@ -131,19 +160,24 @@ async def stream_completion(
 ```python
 import uuid
 import json
+import os
+from datetime import datetime
+from sqlalchemy import update
 from app.agents.claude_client import stream_completion
 from app.db.redis_client import redis_client
 from app.db.session import AsyncSessionLocal
 from app.models.message import Message, SenderType, MessageStatus
 from app.services.message_service import MessageService
 
+_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "facilitator.txt")
+
 class FacilitatorAgent:
     ROLE = "facilitator"
     ROLE_DISPLAY_NAME = "主持人"
-    MODEL = "claude-3-5-sonnet-20241022"
+    MODEL = "selected_model_name"
     
     def __init__(self):
-        with open("app/agents/prompts/facilitator.txt") as f:
+        with open(_PROMPT_PATH, "r", encoding="utf-8") as f:
             self._prompt_template = f.read()
     
     def build_system_prompt(self, context: dict) -> str:
@@ -153,19 +187,24 @@ class FacilitatorAgent:
             current_phase=context.get("current_phase", "第一阶段：问题分析")
         )
     
-    def build_messages(self, history: list[dict]) -> list[dict]:
-        """将历史消息转换为 Claude messages 格式（最近 20-30 条）"""
+    def build_messages(self, context: dict, history: list[dict]) -> list[dict]:
+        """将历史消息合并为一条 user 消息，减少 token 开销并提升兼容性"""
+        history_lines = [
+            f"[{msg['display_name']}]: {msg['content']}"
+            for msg in history[-30:]
+        ]
+        merged_context = "\n".join(history_lines)
+
         return [
+            {"role": "system", "content": self.build_system_prompt(context)},
             {
                 "role": "user",
-                "content": f"[{msg['display_name']}]: {msg['content']}"
-            }
-            for msg in history[-30:]  # 仅取最近 30 条
-        ] + [
-            {
-                "role": "user",
-                "content": "（请根据以上讨论内容，以主持人身份适时发言）"
-            }
+                "content": (
+                    "以下是最近讨论历史，请你以主持人身份适时发言：\n\n"
+                    f"{merged_context}\n\n"
+                    "请直接给出本轮主持人发言。"
+                ),
+            },
         ]
     
     async def generate_and_push(
@@ -206,11 +245,9 @@ class FacilitatorAgent:
         success = True
         
         try:
-            system_prompt = self.build_system_prompt(context)
-            messages = self.build_messages(history)
+            messages = self.build_messages(context, history)
             
             async for token in stream_completion(
-                system_prompt=system_prompt,
                 messages=messages,
                 model=self.MODEL,
                 max_tokens=512
@@ -271,15 +308,29 @@ class FacilitatorAgent:
 P3 阶段使用 APScheduler `AsyncIOScheduler` 每 30 秒检查一次活跃房间沉默情况：
 
 ```python
+import asyncio
+import yaml
+from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.db.redis_client import redis_client
 from app.agents.role_agents import FacilitatorAgent
+from app.agents.context_builder import get_room_context, get_recent_messages
 import time
 
 scheduler = AsyncIOScheduler()
 facilitator = FacilitatorAgent()
 
-SILENCE_THRESHOLD_SECONDS = 180  # 3分钟（演示时可改为30秒）
+_SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "agent_settings.yaml"
+
+def load_agent_settings() -> dict:
+    with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+agent_settings = load_agent_settings()
+timing_cfg = agent_settings.get("timing", {})
+SILENCE_THRESHOLD_SECONDS = int(timing_cfg.get("silence_threshold_seconds", 180))
+WARMUP_SECONDS = int(timing_cfg.get("warmup_minutes", 2)) * 60
+TRIGGER_LOCK_TTL = SILENCE_THRESHOLD_SECONDS + 60
 
 async def check_silence():
     """每30秒轮询：检查各活跃房间是否沉默超过阈值"""
@@ -292,19 +343,26 @@ async def check_silence():
         last_msg_time = await redis_client.get(f"room:{room_id}:last_msg_time")
         if not last_msg_time:
             continue
+
+        # 房间冷启动保护：避免刚开始就触发
+        room_start_time = await redis_client.get(f"room:{room_id}:start_time")
+        if room_start_time and (now - float(room_start_time) < WARMUP_SECONDS):
+            continue
         
         silence_duration = now - float(last_msg_time)
         
         if silence_duration >= SILENCE_THRESHOLD_SECONDS:
-            # 防重复触发：1分钟内不重复
+            # 防重复触发：至少锁住一个沉默周期，避免持续沉默时循环触发
             lock_key = f"trigger_lock:{room_id}:silence"
             if not await redis_client.exists(lock_key):
-                await redis_client.setex(lock_key, 60, "1")
+                await redis_client.setex(lock_key, TRIGGER_LOCK_TTL, "1")
                 
-                # 直接触发 Facilitator（P3 阶段不走队列，直接调用）
+                # P3 阶段不走队列，但使用 create_task 避免阻塞本轮调度
                 context = await get_room_context(room_id)
                 history = await get_recent_messages(room_id)
-                await facilitator.generate_and_push(room_id, context, history)
+                asyncio.create_task(
+                    facilitator.generate_and_push(room_id, context, history)
+                )
 
 def start_scheduler():
     scheduler.add_job(check_silence, "interval", seconds=30)
@@ -336,6 +394,8 @@ async def handle_chat_message(data, room_id, user, db):
     
     # 更新最后消息时间（供沉默检测使用）
     await redis_client.set(f"room:{room_id}:last_msg_time", time.time())
+    # 记录房间启动时间（仅首次写入）
+    await redis_client.setnx(f"room:{room_id}:start_time", time.time())
     # 确保房间在活跃房间集合中
     await redis_client.sadd("active_rooms", room_id)
 ```
@@ -347,9 +407,11 @@ async def handle_chat_message(data, room_id, user, db):
 **文件：** `backend/app/agents/context_builder.py`
 
 ```python
+from sqlalchemy import select
 from app.db.session import AsyncSessionLocal
-from app.models.message import Message
+from app.models.message import Message, MessageStatus
 from app.models.room import Room
+from app.models.room_member import RoomMember
 from app.models.task import Task
 from app.models.user import User
 
@@ -448,15 +510,17 @@ if settings.DEBUG:
 ```javascript
 import { ref } from 'vue'
 import { useChatStore } from '@/stores/chat'
+import { useAgentStore } from '@/stores/agent'
 
 export function useAgentStream() {
   const chatStore = useChatStore()
+  const agentStore = useAgentStore()
   // 流式消息缓冲区：message_id → 累积内容
   const streamBuffers = ref(new Map())
   
   // 处理 agent:typing 事件
   function handleTyping({ agent_role, is_typing }) {
-    useAgentStore().setTyping(agent_role, is_typing)
+    agentStore.setTyping(agent_role, is_typing)
   }
   
   // 处理 agent:stream 事件（逐 token 追加）
@@ -665,6 +729,7 @@ const agentStyle = computed(() =>
 **文件：** `backend/app/config/agent_settings.yaml`
 
 P3 阶段仅配置与沉默检测相关的参数：
+并在 `scheduler.py` 启动时通过 `yaml.safe_load` 读取生效（含 `silence_threshold_seconds` 与 `warmup_minutes`）。
 
 ```yaml
 timing:
@@ -673,7 +738,7 @@ timing:
 
 models:
   role_agents:
-    model_version: "claude-3-5-sonnet-20241022"
+    model_version: "selected_model_name"
     history_token_budget: 6000
 ```
 
@@ -719,7 +784,7 @@ models:
 
 ### 6.4 失败处理
 
-- Claude API 调用失败时：`status` 更新为 `failed`，广播 `agent:stream_end` 携带 `status: "failed"`
+- OpenAI 兼容 API 调用失败时：`status` 更新为 `failed`，广播 `agent:stream_end` 携带 `status: "failed"`
 - 前端收到 `status: "failed"` 时：消息气泡显示为浅灰色，内容显示"（AI 暂时无法回复）"
 - 若生成过程中产生了部分内容，`content` 字段仍保存已生成的部分
 
