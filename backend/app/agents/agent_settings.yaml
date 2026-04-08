@@ -1,4 +1,5 @@
-timing:
+﻿timing:
+  silence_trigger_enabled: false      # false 时关闭“沉默自动触发 AI 发言”
   silence_threshold_seconds: 180
   warmup_minutes: 2
 

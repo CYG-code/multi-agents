@@ -1,5 +1,34 @@
 <template>
-  <div :class="['flex gap-2', isSelf ? 'flex-row-reverse' : 'flex-row']">
+  <div v-if="isAgent" class="flex gap-2">
+    <div
+      :class="[
+        'w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0',
+        agentStyle.bg,
+        agentStyle.text,
+      ]"
+    >
+      {{ agentInitial }}
+    </div>
+
+    <div class="max-w-[80%]">
+      <div class="flex items-center gap-2 mb-1">
+        <span :class="['text-xs font-medium px-2 py-0.5 rounded-full', agentStyle.bg, agentStyle.text]">
+          {{ agentStyle.label }}
+        </span>
+        <span class="text-xs text-gray-400">{{ formatTime(message.created_at) }}</span>
+      </div>
+
+      <div class="bg-gray-50 border border-gray-200 rounded-2xl rounded-tl-sm px-3 py-2 text-sm text-gray-800">
+        {{ message.content }}
+        <span
+          v-if="message.status === 'streaming'"
+          class="inline-block w-0.5 h-4 bg-gray-600 animate-pulse ml-0.5"
+        />
+      </div>
+    </div>
+  </div>
+
+  <div v-else :class="['flex gap-2', isSelf ? 'flex-row-reverse' : 'flex-row']">
     <div
       class="w-8 h-8 rounded-full bg-blue-400 flex items-center justify-center text-white text-sm font-bold flex-shrink-0"
     >
@@ -38,7 +67,26 @@ const props = defineProps({
 
 const authStore = useAuthStore()
 
+const AGENT_COLORS = {
+  facilitator: { bg: 'bg-indigo-100', text: 'text-indigo-700', label: 'Facilitator' },
+  devil_advocate: { bg: 'bg-red-100', text: 'text-red-700', label: 'Devil Advocate' },
+  summarizer: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Summarizer' },
+  resource_finder: { bg: 'bg-green-100', text: 'text-green-700', label: 'Resource Finder' },
+  encourager: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Encourager' },
+}
+
+const isAgent = computed(() => props.message.sender_type === 'agent')
 const isSelf = computed(() => props.message.sender_id === authStore.user?.id)
+
+const agentStyle = computed(() => {
+  return AGENT_COLORS[props.message.agent_role] || { bg: 'bg-gray-100', text: 'text-gray-700', label: 'AI' }
+})
+
+const agentInitial = computed(() => {
+  const label = agentStyle.value.label || 'AI'
+  return label.charAt(0).toUpperCase()
+})
+
 const avatarText = computed(() => {
   const first = (props.message.display_name || '?').trim().charAt(0)
   return first ? first.toUpperCase() : '?'
@@ -51,4 +99,3 @@ function formatTime(value) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 </script>
-

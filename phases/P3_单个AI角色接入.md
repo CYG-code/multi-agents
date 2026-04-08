@@ -1,63 +1,63 @@
-# P3 阶段：单个 AI 角色接入
+# P3 闃舵锛氬崟涓?AI 瑙掕壊鎺ュ叆
 
-**所属项目：** 多智能体辅助在线协作学习平台 v1.2  
-**阶段编号：** P3 / 8  
-**预计周期：** 1 周  
-**前置依赖：** P2（WebSocket 聊天、消息持久化、Redis Pub/Sub）
-
----
-
-## 一、阶段目标
-
-接入 OpenAI 兼容 Chat Completions API（通过中转站），实现第一个 AI 角色智能体（主持人 Facilitator）能够主动在聊天室中发言，验证完整的 AI 消息生成 → 流式推送 → 落库链路。
-
-**完成标志：** 学生停止发言约 3 分钟后（演示模式可调为 30 秒），聊天区出现「主持人」打字动画，随后主持人引导性发言以打字机效果逐字出现，消息最终落库并在刷新后仍然可见。
+**鎵€灞為」鐩細** 澶氭櫤鑳戒綋杈呭姪鍦ㄧ嚎鍗忎綔瀛︿範骞冲彴 v1.2  
+**闃舵缂栧彿锛?* P3 / 8  
+**棰勮鍛ㄦ湡锛?* 1 鍛? 
+**鍓嶇疆渚濊禆锛?* P2锛圵ebSocket 鑱婂ぉ銆佹秷鎭寔涔呭寲銆丷edis Pub/Sub锛?
 
 ---
 
-## 二、开发方案总览
+## 涓€銆侀樁娈电洰鏍?
+
+鎺ュ叆 OpenAI 鍏煎 Chat Completions API锛堥€氳繃涓浆绔欙級锛屽疄鐜扮涓€涓?AI 瑙掕壊鏅鸿兘浣擄紙涓绘寔浜?Facilitator锛夎兘澶熶富鍔ㄥ湪鑱婂ぉ瀹や腑鍙戣█锛岄獙璇佸畬鏁寸殑 AI 娑堟伅鐢熸垚 鈫?娴佸紡鎺ㄩ€?鈫?钀藉簱閾捐矾銆?
+
+**瀹屾垚鏍囧織锛?* 瀛︾敓鍋滄鍙戣█绾?3 鍒嗛挓鍚庯紙婕旂ず妯″紡鍙皟涓?30 绉掞級锛岃亰澶╁尯鍑虹幇銆屼富鎸佷汉銆嶆墦瀛楀姩鐢伙紝闅忓悗涓绘寔浜哄紩瀵兼€у彂瑷€浠ユ墦瀛楁満鏁堟灉閫愬瓧鍑虹幇锛屾秷鎭渶缁堣惤搴撳苟鍦ㄥ埛鏂板悗浠嶇劧鍙銆?
+
+---
+
+## 浜屻€佸紑鍙戞柟妗堟€昏
 
 ```
-P3 分为 3 个核心链路：
+P3 鍒嗕负 3 涓牳蹇冮摼璺細
 
-  A. OpenAI 兼容 API 封装 + Facilitator Prompt 设计
-  B. AI 消息生成链路（预分配 ID → 流式生成 → 落库 → WebSocket 推送）
-  C. 前端流式接收渲染（agent:stream + AgentTypingIndicator）
-  D. 沉默检测 A 类触发器（触发 Facilitator）
-  E. 调试接口
+  A. OpenAI 鍏煎 API 灏佽 + Facilitator Prompt 璁捐
+  B. AI 娑堟伅鐢熸垚閾捐矾锛堥鍒嗛厤 ID 鈫?娴佸紡鐢熸垚 鈫?钀藉簱 鈫?WebSocket 鎺ㄩ€侊級
+  C. 鍓嶇娴佸紡鎺ユ敹娓叉煋锛坅gent:stream + AgentTypingIndicator锛?
+  D. 娌夐粯妫€娴?A 绫昏Е鍙戝櫒锛堣Е鍙?Facilitator锛?
+  E. 璋冭瘯鎺ュ彛
 ```
 
 ---
 
-## 评审结论修订（同步更新）
+## 璇勫缁撹淇锛堝悓姝ユ洿鏂帮級
 
-1. 第 1 点严重程度由「中等」降级为「建议优化（非阻断）」。
-2. OpenAI 兼容接口（`/v1/chat/completions`）通常允许连续相同 `role`，多数中转站也可正常处理，因此不会作为阻断性问题。
-3. 仍建议将历史上下文合并为单条消息：减少 token 开销、提升跨模型/中转站稳定性、语义更清晰。
-4. 该项属于非阻断性建议，不改也能跑，但建议在本阶段完成以减少后续兼容成本。
-5. 第 2 点（沉默循环触发）仍是阻断性问题，不受 API 选择影响。
-6. 第 3-5 点结论不变，维持原判。
+1. 绗?1 鐐逛弗閲嶇▼搴︾敱銆屼腑绛夈€嶉檷绾т负銆屽缓璁紭鍖栵紙闈為樆鏂級銆嶃€?
+2. OpenAI 鍏煎鎺ュ彛锛坄/v1/chat/completions`锛夐€氬父鍏佽杩炵画鐩稿悓 `role`锛屽鏁颁腑杞珯涔熷彲姝ｅ父澶勭悊锛屽洜姝や笉浼氫綔涓洪樆鏂€ч棶棰樸€?
+3. 浠嶅缓璁皢鍘嗗彶涓婁笅鏂囧悎骞朵负鍗曟潯娑堟伅锛氬噺灏?token 寮€閿€銆佹彁鍗囪法妯″瀷/涓浆绔欑ǔ瀹氭€с€佽涔夋洿娓呮櫚銆?
+4. 璇ラ」灞炰簬闈為樆鏂€у缓璁紝涓嶆敼涔熻兘璺戯紝浣嗗缓璁湪鏈樁娈靛畬鎴愪互鍑忓皯鍚庣画鍏煎鎴愭湰銆?
+5. 绗?2 鐐癸紙娌夐粯寰幆瑙﹀彂锛変粛鏄樆鏂€ч棶棰橈紝涓嶅彈 API 閫夋嫨褰卞搷銆?
+6. 绗?3-5 鐐圭粨璁轰笉鍙橈紝缁存寔鍘熷垽銆?
 
 ---
 
-## 三、详细开发步骤
+## 涓夈€佽缁嗗紑鍙戞楠?
 
-### 步骤 1：配置 OpenAI 兼容 API Key 并封装调用工具
+### 姝ラ 1锛氶厤缃?OpenAI 鍏煎 API Key 骞跺皝瑁呰皟鐢ㄥ伐鍏?
 
-**文件：** `backend/app/agents/claude_client.py`（建议后续更名为 `llm_client.py`）
+**鏂囦欢锛?* `backend/app/agents/llm_client.py`锛堝缓璁悗缁洿鍚嶄负 `llm_client.py`锛?
 
 ```python
 from openai import AsyncOpenAI
 from app.config import settings
 
-# 全局单例 OpenAI 兼容客户端
+# 鍏ㄥ眬鍗曚緥 OpenAI 鍏煎瀹㈡埛绔?
 _client: AsyncOpenAI = None
 
 def get_llm_client() -> AsyncOpenAI:
     global _client
     if _client is None:
         _client = AsyncOpenAI(
-            base_url=settings.OPENAI_BASE_URL,  # 例如: https://yunwu.ai/v1
+            base_url=settings.OPENAI_BASE_URL,  # 渚嬪: https://yunwu.ai/v1
             api_key=settings.OPENAI_API_KEY
         )
     return _client
@@ -68,8 +68,8 @@ async def stream_completion(
     max_tokens: int = 1024,
 ):
     """
-    封装流式调用，返回异步生成器，每次 yield 一个 token 字符串。
-    调用方负责处理异常。
+    灏佽娴佸紡璋冪敤锛岃繑鍥炲紓姝ョ敓鎴愬櫒锛屾瘡娆?yield 涓€涓?token 瀛楃涓层€?
+    璋冪敤鏂硅礋璐ｅ鐞嗗紓甯搞€?
     """
     client = get_llm_client()
 
@@ -89,7 +89,7 @@ async def one_shot_completion(
     messages: list[dict],
     model: str = "selected_model_name",
 ):
-    """非流式调用示例：使用 choices[0].message.content 取结果"""
+    """闈炴祦寮忚皟鐢ㄧず渚嬶細浣跨敤 choices[0].message.content 鍙栫粨鏋?""
     client = get_llm_client()
     resp = await client.chat.completions.create(
         model=model,
@@ -101,60 +101,60 @@ async def one_shot_completion(
 
 ---
 
-### 步骤 2：编写 Facilitator 角色 System Prompt
+### 姝ラ 2锛氱紪鍐?Facilitator 瑙掕壊 System Prompt
 
-**文件：** `backend/app/agents/prompts/facilitator.txt`
+**鏂囦欢锛?* `backend/app/agents/prompts/facilitator.txt`
 
 ```
-你是一个在线协作学习小组的「主持人」成员。
+浣犳槸涓€涓湪绾垮崗浣滃涔犲皬缁勭殑銆屼富鎸佷汉銆嶆垚鍛樸€?
 
-【角色定位】
-你的名字是"小林"，是小组中的学习伙伴，不是AI助手。你性格积极、思路清晰，擅长引导讨论方向。
+銆愯鑹插畾浣嶃€?
+浣犵殑鍚嶅瓧鏄?灏忔灄"锛屾槸灏忕粍涓殑瀛︿範浼欎即锛屼笉鏄疉I鍔╂墜銆備綘鎬ф牸绉瀬銆佹€濊矾娓呮櫚锛屾搮闀垮紩瀵艰璁烘柟鍚戙€?
 
-【你的协作职责】
-- 当讨论沉默超过一段时间时，主动抛出一个有启发性的问题来重启对话
-- 帮助整合发散的讨论，提出结构性框架
-- 在讨论偏题时温和地引导回主题
+銆愪綘鐨勫崗浣滆亴璐ｃ€?
+- 褰撹璁烘矇榛樿秴杩囦竴娈垫椂闂存椂锛屼富鍔ㄦ姏鍑轰竴涓湁鍚彂鎬х殑闂鏉ラ噸鍚璇?
+- 甯姪鏁村悎鍙戞暎鐨勮璁猴紝鎻愬嚭缁撴瀯鎬ф鏋?
+- 鍦ㄨ璁哄亸棰樻椂娓╁拰鍦板紩瀵煎洖涓婚
 
-【行为准则】
-- 每次发言控制在 80-150 字，符合聊天语境，简洁有力
-- 语气自然真实，像真正的组员，不要像AI助手或老师
-- 禁止暴露自己是AI或说"作为AI我..."之类的话
-- 不要开头就解释自己为什么说话，直接切入内容
-- 可以用"大家""我们"等表达，展现团队归属感
+銆愯涓哄噯鍒欍€?
+- 姣忔鍙戣█鎺у埗鍦?80-150 瀛楋紝绗﹀悎鑱婂ぉ璇锛岀畝娲佹湁鍔?
+- 璇皵鑷劧鐪熷疄锛屽儚鐪熸鐨勭粍鍛橈紝涓嶈鍍廇I鍔╂墜鎴栬€佸笀
+- 绂佹鏆撮湶鑷繁鏄疉I鎴栬"浣滀负AI鎴?.."涔嬬被鐨勮瘽
+- 涓嶈寮€澶村氨瑙ｉ噴鑷繁涓轰粈涔堣璇濓紝鐩存帴鍒囧叆鍐呭
+- 鍙互鐢?澶у""鎴戜滑"绛夎〃杈撅紝灞曠幇鍥㈤槦褰掑睘鎰?
 
-【当前任务上下文】
+銆愬綋鍓嶄换鍔′笂涓嬫枃銆?
 {task_description}
 
-【小组成员】
+銆愬皬缁勬垚鍛樸€?
 {members_info}
 
-【当前协作阶段】
+銆愬綋鍓嶅崗浣滈樁娈点€?
 {current_phase}
 ```
 
-> **Prompt 注入变量说明：**
-> - `{task_description}`：从 `tasks.requirements` 读取
-> - `{members_info}`：房间成员列表（display_name 列表）
-> - `{current_phase}`：当前阶段名称（P3 阶段写死为"第一阶段：问题分析"）
+> **Prompt 娉ㄥ叆鍙橀噺璇存槑锛?*
+> - `{task_description}`锛氫粠 `tasks.requirements` 璇诲彇
+> - `{members_info}`锛氭埧闂存垚鍛樺垪琛紙display_name 鍒楄〃锛?
+> - `{current_phase}`锛氬綋鍓嶉樁娈靛悕绉帮紙P3 闃舵鍐欐涓?绗竴闃舵锛氶棶棰樺垎鏋?锛?
 
 ---
 
-### 步骤 3：实现流式 AI 消息生成链路
+### 姝ラ 3锛氬疄鐜版祦寮?AI 娑堟伅鐢熸垚閾捐矾
 
-**文件：** `backend/app/agents/role_agents.py`
+**鏂囦欢锛?* `backend/app/agents/role_agents.py`
 
-这是 P3 阶段的核心逻辑，完整流程如下：
+杩欐槸 P3 闃舵鐨勬牳蹇冮€昏緫锛屽畬鏁存祦绋嬪涓嬶細
 
 ```
-1. 预分配 message_id（UUID）
-2. 写入 status=streaming 的消息记录
-3. 通过 WebSocket 广播 agent:typing（is_typing=true）
-4. 调用 OpenAI 兼容接口流式生成
-5. 每个 token → 广播 agent:stream 事件
-6. 生成完毕 → 更新数据库记录 status=ok / failed
-7. 广播 agent:stream_end 事件
-8. 广播 agent:typing（is_typing=false）
+1. 棰勫垎閰?message_id锛圲UID锛?
+2. 鍐欏叆 status=streaming 鐨勬秷鎭褰?
+3. 閫氳繃 WebSocket 骞挎挱 agent:typing锛坕s_typing=true锛?
+4. 璋冪敤 OpenAI 鍏煎鎺ュ彛娴佸紡鐢熸垚
+5. 姣忎釜 token 鈫?骞挎挱 agent:stream 浜嬩欢
+6. 鐢熸垚瀹屾瘯 鈫?鏇存柊鏁版嵁搴撹褰?status=ok / failed
+7. 骞挎挱 agent:stream_end 浜嬩欢
+8. 骞挎挱 agent:typing锛坕s_typing=false锛?
 ```
 
 ```python
@@ -163,7 +163,7 @@ import json
 import os
 from datetime import datetime
 from sqlalchemy import update
-from app.agents.claude_client import stream_completion
+from app.agents.llm_client import stream_completion
 from app.db.redis_client import redis_client
 from app.db.session import AsyncSessionLocal
 from app.models.message import Message, SenderType, MessageStatus
@@ -173,7 +173,7 @@ _PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "facilitator.t
 
 class FacilitatorAgent:
     ROLE = "facilitator"
-    ROLE_DISPLAY_NAME = "主持人"
+    ROLE_DISPLAY_NAME = "涓绘寔浜?
     MODEL = "selected_model_name"
     
     def __init__(self):
@@ -182,13 +182,13 @@ class FacilitatorAgent:
     
     def build_system_prompt(self, context: dict) -> str:
         return self._prompt_template.format(
-            task_description=context.get("task_description", "讨论一个社会议题"),
+            task_description=context.get("task_description", "璁ㄨ涓€涓ぞ浼氳棰?),
             members_info=context.get("members_info", ""),
-            current_phase=context.get("current_phase", "第一阶段：问题分析")
+            current_phase=context.get("current_phase", "绗竴闃舵锛氶棶棰樺垎鏋?)
         )
     
     def build_messages(self, context: dict, history: list[dict]) -> list[dict]:
-        """将历史消息合并为一条 user 消息，减少 token 开销并提升兼容性"""
+        """灏嗗巻鍙叉秷鎭悎骞朵负涓€鏉?user 娑堟伅锛屽噺灏?token 寮€閿€骞舵彁鍗囧吋瀹规€?""
         history_lines = [
             f"[{msg['display_name']}]: {msg['content']}"
             for msg in history[-30:]
@@ -200,9 +200,9 @@ class FacilitatorAgent:
             {
                 "role": "user",
                 "content": (
-                    "以下是最近讨论历史，请你以主持人身份适时发言：\n\n"
+                    "浠ヤ笅鏄渶杩戣璁哄巻鍙诧紝璇蜂綘浠ヤ富鎸佷汉韬唤閫傛椂鍙戣█锛歕n\n"
                     f"{merged_context}\n\n"
-                    "请直接给出本轮主持人发言。"
+                    "璇风洿鎺ョ粰鍑烘湰杞富鎸佷汉鍙戣█銆?
                 ),
             },
         ]
@@ -213,12 +213,12 @@ class FacilitatorAgent:
         context: dict,
         history: list[dict],
     ):
-        """主入口：生成 AI 发言并流式推送至聊天室"""
+        """涓诲叆鍙ｏ細鐢熸垚 AI 鍙戣█骞舵祦寮忔帹閫佽嚦鑱婂ぉ瀹?""
         
-        # Step 1: 预分配 message_id
+        # Step 1: 棰勫垎閰?message_id
         message_id = str(uuid.uuid4())
         
-        # Step 2: 写入 status=streaming 的记录
+        # Step 2: 鍐欏叆 status=streaming 鐨勮褰?
         async with AsyncSessionLocal() as db:
             seq_num = await MessageService.get_next_seq_num(room_id)
             msg = Message(
@@ -227,20 +227,20 @@ class FacilitatorAgent:
                 seq_num=seq_num,
                 sender_type=SenderType.agent,
                 agent_role=self.ROLE,
-                content="",  # 流式期间暂时为空
+                content="",  # 娴佸紡鏈熼棿鏆傛椂涓虹┖
                 status=MessageStatus.streaming
             )
             db.add(msg)
             await db.commit()
         
-        # Step 3: 广播打字状态
+        # Step 3: 骞挎挱鎵撳瓧鐘舵€?
         await self._broadcast(room_id, {
             "type": "agent:typing",
             "agent_role": self.ROLE,
             "is_typing": True
         })
         
-        # Step 4-5: 流式生成并推送
+        # Step 4-5: 娴佸紡鐢熸垚骞舵帹閫?
         full_content = ""
         success = True
         
@@ -261,10 +261,10 @@ class FacilitatorAgent:
                 })
         
         except Exception as e:
-            print(f"[FacilitatorAgent] 生成失败: {e}")
+            print(f"[FacilitatorAgent] 鐢熸垚澶辫触: {e}")
             success = False
         
-        # Step 6: 更新数据库记录
+        # Step 6: 鏇存柊鏁版嵁搴撹褰?
         final_status = MessageStatus.ok if success else MessageStatus.failed
         async with AsyncSessionLocal() as db:
             await db.execute(
@@ -277,17 +277,17 @@ class FacilitatorAgent:
             )
             await db.commit()
         
-        # Step 7: 广播流式结束事件
+        # Step 7: 骞挎挱娴佸紡缁撴潫浜嬩欢
         await self._broadcast(room_id, {
             "type": "agent:stream_end",
             "agent_role": self.ROLE,
             "message_id": message_id,
             "status": "ok" if success else "failed",
-            "content": full_content,  # 完整内容，便于前端替换
+            "content": full_content,  # 瀹屾暣鍐呭锛屼究浜庡墠绔浛鎹?
             "created_at": datetime.utcnow().isoformat()
         })
         
-        # Step 8: 关闭打字状态
+        # Step 8: 鍏抽棴鎵撳瓧鐘舵€?
         await self._broadcast(room_id, {
             "type": "agent:typing",
             "agent_role": self.ROLE,
@@ -295,17 +295,17 @@ class FacilitatorAgent:
         })
     
     async def _broadcast(self, room_id: str, data: dict):
-        """通过 Redis Pub/Sub 广播至房间"""
+        """閫氳繃 Redis Pub/Sub 骞挎挱鑷虫埧闂?""
         await redis_client.publish(f"room:{room_id}", json.dumps(data))
 ```
 
 ---
 
-### 步骤 4：实现 A 类沉默检测触发器
+### 姝ラ 4锛氬疄鐜?A 绫绘矇榛樻娴嬭Е鍙戝櫒
 
-**文件：** `backend/app/analysis/scheduler.py`（P3 简化版）
+**鏂囦欢锛?* `backend/app/analysis/scheduler.py`锛圥3 绠€鍖栫増锛?
 
-P3 阶段使用 APScheduler `AsyncIOScheduler` 每 30 秒检查一次活跃房间沉默情况：
+P3 闃舵浣跨敤 APScheduler `AsyncIOScheduler` 姣?30 绉掓鏌ヤ竴娆℃椿璺冩埧闂存矇榛樻儏鍐碉細
 
 ```python
 import asyncio
@@ -333,18 +333,18 @@ WARMUP_SECONDS = int(timing_cfg.get("warmup_minutes", 2)) * 60
 TRIGGER_LOCK_TTL = SILENCE_THRESHOLD_SECONDS + 60
 
 async def check_silence():
-    """每30秒轮询：检查各活跃房间是否沉默超过阈值"""
-    # 获取所有活跃房间（从 Redis Set 维护）
+    """姣?0绉掕疆璇細妫€鏌ュ悇娲昏穬鎴块棿鏄惁娌夐粯瓒呰繃闃堝€?""
+    # 鑾峰彇鎵€鏈夋椿璺冩埧闂达紙浠?Redis Set 缁存姢锛?
     active_rooms = await redis_client.smembers("active_rooms")
     
     now = time.time()
     for room_id in active_rooms:
-        # 获取最后一条消息时间戳
+        # 鑾峰彇鏈€鍚庝竴鏉℃秷鎭椂闂存埑
         last_msg_time = await redis_client.get(f"room:{room_id}:last_msg_time")
         if not last_msg_time:
             continue
 
-        # 房间冷启动保护：避免刚开始就触发
+        # 鎴块棿鍐峰惎鍔ㄤ繚鎶わ細閬垮厤鍒氬紑濮嬪氨瑙﹀彂
         room_start_time = await redis_client.get(f"room:{room_id}:start_time")
         if room_start_time and (now - float(room_start_time) < WARMUP_SECONDS):
             continue
@@ -352,12 +352,12 @@ async def check_silence():
         silence_duration = now - float(last_msg_time)
         
         if silence_duration >= SILENCE_THRESHOLD_SECONDS:
-            # 防重复触发：至少锁住一个沉默周期，避免持续沉默时循环触发
+            # 闃查噸澶嶈Е鍙戯細鑷冲皯閿佷綇涓€涓矇榛樺懆鏈燂紝閬垮厤鎸佺画娌夐粯鏃跺惊鐜Е鍙?
             lock_key = f"trigger_lock:{room_id}:silence"
             if not await redis_client.exists(lock_key):
                 await redis_client.setex(lock_key, TRIGGER_LOCK_TTL, "1")
                 
-                # P3 阶段不走队列，但使用 create_task 避免阻塞本轮调度
+                # P3 闃舵涓嶈蛋闃熷垪锛屼絾浣跨敤 create_task 閬垮厤闃诲鏈疆璋冨害
                 context = await get_room_context(room_id)
                 history = await get_recent_messages(room_id)
                 asyncio.create_task(
@@ -372,9 +372,9 @@ def stop_scheduler():
     scheduler.shutdown()
 ```
 
-> **注意：** P3 阶段 Facilitator 直接被调用（不走 Redis 任务队列），P4 阶段重构为 AgentWorker 模式。
+> **娉ㄦ剰锛?* P3 闃舵 Facilitator 鐩存帴琚皟鐢紙涓嶈蛋 Redis 浠诲姟闃熷垪锛夛紝P4 闃舵閲嶆瀯涓?AgentWorker 妯″紡銆?
 
-**在 `main.py` lifespan 中启动调度器：**
+**鍦?`main.py` lifespan 涓惎鍔ㄨ皟搴﹀櫒锛?*
 
 ```python
 @asynccontextmanager
@@ -386,25 +386,25 @@ async def lifespan(app: FastAPI):
     await close_redis()
 ```
 
-**维护 `last_msg_time`（在 `handle_chat_message` 中更新）：**
+**缁存姢 `last_msg_time`锛堝湪 `handle_chat_message` 涓洿鏂帮級锛?*
 
 ```python
 async def handle_chat_message(data, room_id, user, db):
-    # ... 消息保存逻辑 ...
+    # ... 娑堟伅淇濆瓨閫昏緫 ...
     
-    # 更新最后消息时间（供沉默检测使用）
+    # 鏇存柊鏈€鍚庢秷鎭椂闂达紙渚涙矇榛樻娴嬩娇鐢級
     await redis_client.set(f"room:{room_id}:last_msg_time", time.time())
-    # 记录房间启动时间（仅首次写入）
+    # 璁板綍鎴块棿鍚姩鏃堕棿锛堜粎棣栨鍐欏叆锛?
     await redis_client.setnx(f"room:{room_id}:start_time", time.time())
-    # 确保房间在活跃房间集合中
+    # 纭繚鎴块棿鍦ㄦ椿璺冩埧闂撮泦鍚堜腑
     await redis_client.sadd("active_rooms", room_id)
 ```
 
 ---
 
-### 步骤 5：获取房间上下文和历史消息的辅助函数
+### 姝ラ 5锛氳幏鍙栨埧闂翠笂涓嬫枃鍜屽巻鍙叉秷鎭殑杈呭姪鍑芥暟
 
-**文件：** `backend/app/agents/context_builder.py`
+**鏂囦欢锛?* `backend/app/agents/context_builder.py`
 
 ```python
 from sqlalchemy import select
@@ -416,12 +416,12 @@ from app.models.task import Task
 from app.models.user import User
 
 async def get_room_context(room_id: str) -> dict:
-    """构建 Agent 所需的房间上下文（任务描述、成员列表、当前阶段）"""
+    """鏋勫缓 Agent 鎵€闇€鐨勬埧闂翠笂涓嬫枃锛堜换鍔℃弿杩般€佹垚鍛樺垪琛ㄣ€佸綋鍓嶉樁娈碉級"""
     async with AsyncSessionLocal() as db:
         room = await db.get(Room, room_id)
         task = await db.get(Task, room.task_id) if room.task_id else None
         
-        # 获取房间成员显示名称
+        # 鑾峰彇鎴块棿鎴愬憳鏄剧ず鍚嶇О
         result = await db.execute(
             select(User.display_name)
             .join(RoomMember, User.id == RoomMember.user_id)
@@ -430,13 +430,13 @@ async def get_room_context(room_id: str) -> dict:
         members = [r[0] for r in result.fetchall()]
         
         return {
-            "task_description": task.requirements if task else "讨论一个社会议题",
-            "members_info": "、".join(members),
-            "current_phase": "第一阶段：问题分析",  # P3 暂时写死
+            "task_description": task.requirements if task else "璁ㄨ涓€涓ぞ浼氳棰?,
+            "members_info": "銆?.join(members),
+            "current_phase": "绗竴闃舵锛氶棶棰樺垎鏋?,  # P3 鏆傛椂鍐欐
         }
 
 async def get_recent_messages(room_id: str, limit: int = 30) -> list[dict]:
-    """获取最近 N 条已完成的消息（status=ok）"""
+    """鑾峰彇鏈€杩?N 鏉″凡瀹屾垚鐨勬秷鎭紙status=ok锛?""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Message, User.display_name)
@@ -463,16 +463,16 @@ async def get_recent_messages(room_id: str, limit: int = 30) -> list[dict]:
 
 ---
 
-### 步骤 6：实现调试接口
+### 姝ラ 6锛氬疄鐜拌皟璇曟帴鍙?
 
-**文件：** `backend/app/routers/debug.py`（仅开发环境启用）
+**鏂囦欢锛?* `backend/app/routers/debug.py`锛堜粎寮€鍙戠幆澧冨惎鐢級
 
 ```python
 from fastapi import APIRouter, BackgroundTasks
 from app.agents.role_agents import FacilitatorAgent
 from app.agents.context_builder import get_room_context, get_recent_messages
 
-debug_router = APIRouter(prefix="/api/debug", tags=["调试"])
+debug_router = APIRouter(prefix="/api/debug", tags=["璋冭瘯"])
 facilitator = FacilitatorAgent()
 
 @debug_router.post("/trigger-agent")
@@ -480,7 +480,7 @@ async def trigger_agent(
     room_id: str,
     background_tasks: BackgroundTasks
 ):
-    """手动触发 Facilitator 发言（调试用）"""
+    """鎵嬪姩瑙﹀彂 Facilitator 鍙戣█锛堣皟璇曠敤锛?""
     context = await get_room_context(room_id)
     history = await get_recent_messages(room_id)
     
@@ -495,7 +495,7 @@ async def trigger_agent(
 ```
 
 ```python
-# main.py 中仅在开发模式下注册
+# main.py 涓粎鍦ㄥ紑鍙戞ā寮忎笅娉ㄥ唽
 if settings.DEBUG:
     from app.routers.debug import debug_router
     app.include_router(debug_router)
@@ -503,9 +503,9 @@ if settings.DEBUG:
 
 ---
 
-### 步骤 7：前端 useAgentStream Composable
+### 姝ラ 7锛氬墠绔?useAgentStream Composable
 
-**文件：** `frontend/src/composables/useAgentStream.js`
+**鏂囦欢锛?* `frontend/src/composables/useAgentStream.js`
 
 ```javascript
 import { ref } from 'vue'
@@ -515,18 +515,18 @@ import { useAgentStore } from '@/stores/agent'
 export function useAgentStream() {
   const chatStore = useChatStore()
   const agentStore = useAgentStore()
-  // 流式消息缓冲区：message_id → 累积内容
+  // 娴佸紡娑堟伅缂撳啿鍖猴細message_id 鈫?绱Н鍐呭
   const streamBuffers = ref(new Map())
   
-  // 处理 agent:typing 事件
+  // 澶勭悊 agent:typing 浜嬩欢
   function handleTyping({ agent_role, is_typing }) {
     agentStore.setTyping(agent_role, is_typing)
   }
   
-  // 处理 agent:stream 事件（逐 token 追加）
+  // 澶勭悊 agent:stream 浜嬩欢锛堥€?token 杩藉姞锛?
   function handleStream({ agent_role, message_id, token }) {
     if (!streamBuffers.value.has(message_id)) {
-      // 首个 token：在消息列表中创建流式占位消息
+      // 棣栦釜 token锛氬湪娑堟伅鍒楄〃涓垱寤烘祦寮忓崰浣嶆秷鎭?
       streamBuffers.value.set(message_id, '')
       chatStore.addMessage({
         id: message_id,
@@ -538,19 +538,19 @@ export function useAgentStream() {
       })
     }
     
-    // 追加 token
+    // 杩藉姞 token
     const current = streamBuffers.value.get(message_id) + token
     streamBuffers.value.set(message_id, current)
     
-    // 更新消息列表中的占位消息
+    // 鏇存柊娑堟伅鍒楄〃涓殑鍗犱綅娑堟伅
     chatStore.updateMessageContent(message_id, current)
   }
   
-  // 处理 agent:stream_end 事件
+  // 澶勭悊 agent:stream_end 浜嬩欢
   function handleStreamEnd({ message_id, status, content, created_at }) {
     streamBuffers.value.delete(message_id)
     
-    // 将流式占位消息替换为最终版本
+    // 灏嗘祦寮忓崰浣嶆秷鎭浛鎹负鏈€缁堢増鏈?
     chatStore.finalizeMessage(message_id, {
       content,
       status,
@@ -562,10 +562,10 @@ export function useAgentStream() {
 }
 ```
 
-**扩展 `chat store` 支持流式操作：**
+**鎵╁睍 `chat store` 鏀寔娴佸紡鎿嶄綔锛?*
 
 ```javascript
-// stores/chat.js 新增 actions
+// stores/chat.js 鏂板 actions
 updateMessageContent(messageId, content) {
   const msg = this.messages.find(m => m.id === messageId)
   if (msg) msg.content = content
@@ -579,9 +579,9 @@ finalizeMessage(messageId, updates) {
 
 ---
 
-### 步骤 8：AgentTypingIndicator 组件
+### 姝ラ 8锛欰gentTypingIndicator 缁勪欢
 
-**文件：** `frontend/src/components/chat/AgentTypingIndicator.vue`
+**鏂囦欢锛?* `frontend/src/components/chat/AgentTypingIndicator.vue`
 
 ```vue
 <script setup>
@@ -591,11 +591,11 @@ import { useAgentStore } from '@/stores/agent'
 const agentStore = useAgentStore()
 
 const ROLE_NAMES = {
-  facilitator: '主持人',
-  devil_advocate: '批判者',
-  summarizer: '总结者',
-  resource_finder: '资源者',
-  encourager: '激励者'
+  facilitator: '涓绘寔浜?,
+  devil_advocate: '鎵瑰垽鑰?,
+  summarizer: '鎬荤粨鑰?,
+  resource_finder: '璧勬簮鑰?,
+  encourager: '婵€鍔辫€?
 }
 
 const typingRoles = computed(() => {
@@ -609,19 +609,19 @@ const typingRoles = computed(() => {
   <Transition name="fade">
     <div v-if="typingRoles.length > 0"
          class="flex items-center gap-2 px-4 py-2 text-sm text-gray-500">
-      <!-- 三点动画 -->
+      <!-- 涓夌偣鍔ㄧ敾 -->
       <div class="flex gap-1">
         <span v-for="i in 3" :key="i"
               class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"
               :style="{ animationDelay: `${i * 0.15}s` }" />
       </div>
-      <span>{{ typingRoles.join('、') }} 正在输入...</span>
+      <span>{{ typingRoles.join('銆?) }} 姝ｅ湪杈撳叆...</span>
     </div>
   </Transition>
 </template>
 ```
 
-**Agent Store：**
+**Agent Store锛?*
 
 ```javascript
 // stores/agent.js
@@ -647,9 +647,9 @@ export const useAgentStore = defineStore('agent', {
 
 ---
 
-### 步骤 9：更新 ChatPanel 接入 Agent 流式事件
+### 姝ラ 9锛氭洿鏂?ChatPanel 鎺ュ叆 Agent 娴佸紡浜嬩欢
 
-**文件：** `frontend/src/components/chat/ChatPanel.vue`（扩展）
+**鏂囦欢锛?* `frontend/src/components/chat/ChatPanel.vue`锛堟墿灞曪級
 
 ```javascript
 import { useAgentStream } from '@/composables/useAgentStream'
@@ -657,9 +657,9 @@ import { useAgentStream } from '@/composables/useAgentStream'
 const { handleTyping, handleStream, handleStreamEnd } = useAgentStream()
 
 onMounted(() => {
-  // ... 已有的事件监听 ...
+  // ... 宸叉湁鐨勪簨浠剁洃鍚?...
   
-  // 新增 Agent 相关事件
+  // 鏂板 Agent 鐩稿叧浜嬩欢
   on('agent:typing', handleTyping)
   on('agent:stream', handleStream)
   on('agent:stream_end', handleStreamEnd)
@@ -668,18 +668,18 @@ onMounted(() => {
 
 ---
 
-### 步骤 10：MessageItem 扩展 AI 消息样式
+### 姝ラ 10锛歁essageItem 鎵╁睍 AI 娑堟伅鏍峰紡
 
-**文件：** `frontend/src/components/chat/MessageItem.vue`（扩展）
+**鏂囦欢锛?* `frontend/src/components/chat/MessageItem.vue`锛堟墿灞曪級
 
 ```vue
 <script setup>
 const AGENT_COLORS = {
-  facilitator: { bg: 'bg-purple-100', text: 'text-purple-700', label: '主持人' },
-  devil_advocate: { bg: 'bg-red-100', text: 'text-red-700', label: '批判者' },
-  summarizer: { bg: 'bg-blue-100', text: 'text-blue-700', label: '总结者' },
-  resource_finder: { bg: 'bg-green-100', text: 'text-green-700', label: '资源者' },
-  encourager: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: '激励者' }
+  facilitator: { bg: 'bg-purple-100', text: 'text-purple-700', label: '涓绘寔浜? },
+  devil_advocate: { bg: 'bg-red-100', text: 'text-red-700', label: '鎵瑰垽鑰? },
+  summarizer: { bg: 'bg-blue-100', text: 'text-blue-700', label: '鎬荤粨鑰? },
+  resource_finder: { bg: 'bg-green-100', text: 'text-green-700', label: '璧勬簮鑰? },
+  encourager: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: '婵€鍔辫€? }
 }
 
 const isAgent = computed(() => props.message.sender_type === 'agent')
@@ -689,16 +689,16 @@ const agentStyle = computed(() =>
 </script>
 
 <template>
-  <!-- AI 消息样式 -->
+  <!-- AI 娑堟伅鏍峰紡 -->
   <div v-if="isAgent" class="flex gap-2">
-    <!-- AI 角色头像 -->
+    <!-- AI 瑙掕壊澶村儚 -->
     <div :class="['w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0',
                   agentStyle.bg, agentStyle.text]">
       {{ agentStyle.label[0] }}
     </div>
     
     <div class="max-w-[80%]">
-      <!-- 角色标签 -->
+      <!-- 瑙掕壊鏍囩 -->
       <div class="flex items-center gap-2 mb-1">
         <span :class="['text-xs font-medium px-2 py-0.5 rounded-full', agentStyle.bg, agentStyle.text]">
           {{ agentStyle.label }}
@@ -706,7 +706,7 @@ const agentStyle = computed(() =>
         <span class="text-xs text-gray-400">{{ formatTime(message.created_at) }}</span>
       </div>
       
-      <!-- 消息内容（流式状态显示光标） -->
+      <!-- 娑堟伅鍐呭锛堟祦寮忕姸鎬佹樉绀哄厜鏍囷級 -->
       <div class="bg-gray-50 border border-gray-200 rounded-2xl rounded-tl-sm px-3 py-2 text-sm text-gray-800">
         {{ message.content }}
         <span v-if="message.status === 'streaming'"
@@ -715,26 +715,26 @@ const agentStyle = computed(() =>
     </div>
   </div>
   
-  <!-- 学生消息样式（原有代码） -->
+  <!-- 瀛︾敓娑堟伅鏍峰紡锛堝師鏈変唬鐮侊級 -->
   <div v-else>
-    <!-- ... 已有实现 ... -->
+    <!-- ... 宸叉湁瀹炵幇 ... -->
   </div>
 </template>
 ```
 
 ---
 
-## 四、agent_settings.yaml 初始化（P3 引入）
+## 鍥涖€乤gent_settings.yaml 鍒濆鍖栵紙P3 寮曞叆锛?
 
-**文件：** `backend/app/config/agent_settings.yaml`
+**鏂囦欢锛?* `backend/app/config/agent_settings.yaml`
 
-P3 阶段仅配置与沉默检测相关的参数：
-并在 `scheduler.py` 启动时通过 `yaml.safe_load` 读取生效（含 `silence_threshold_seconds` 与 `warmup_minutes`）。
+P3 闃舵浠呴厤缃笌娌夐粯妫€娴嬬浉鍏崇殑鍙傛暟锛?
+骞跺湪 `scheduler.py` 鍚姩鏃堕€氳繃 `yaml.safe_load` 璇诲彇鐢熸晥锛堝惈 `silence_threshold_seconds` 涓?`warmup_minutes`锛夈€?
 
 ```yaml
 timing:
-  silence_threshold_seconds: 180   # 沉默检测阈值（演示时改为30）
-  warmup_minutes: 2                 # 房间开始后不触发的等待时间
+  silence_threshold_seconds: 180   # 娌夐粯妫€娴嬮槇鍊硷紙婕旂ず鏃舵敼涓?0锛?
+  warmup_minutes: 2                 # 鎴块棿寮€濮嬪悗涓嶈Е鍙戠殑绛夊緟鏃堕棿
 
 models:
   role_agents:
@@ -744,87 +744,87 @@ models:
 
 ---
 
-## 五、WebSocket 事件协议（P3 新增）
+## 浜斻€乄ebSocket 浜嬩欢鍗忚锛圥3 鏂板锛?
 
-| 事件名 | 方向 | 数据结构 | 说明 |
+| 浜嬩欢鍚?| 鏂瑰悜 | 鏁版嵁缁撴瀯 | 璇存槑 |
 |--------|------|----------|------|
-| `agent:typing` | 服→客 | `{type, agent_role, is_typing: bool}` | AI 打字状态指示 |
-| `agent:stream` | 服→客 | `{type, agent_role, message_id, token}` | 流式 token 推送 |
-| `agent:stream_end` | 服→客 | `{type, agent_role, message_id, status, content, created_at}` | 流式结束，携带完整内容 |
+| `agent:typing` | 鏈嶁啋瀹?| `{type, agent_role, is_typing: bool}` | AI 鎵撳瓧鐘舵€佹寚绀?|
+| `agent:stream` | 鏈嶁啋瀹?| `{type, agent_role, message_id, token}` | 娴佸紡 token 鎺ㄩ€?|
+| `agent:stream_end` | 鏈嶁啋瀹?| `{type, agent_role, message_id, status, content, created_at}` | 娴佸紡缁撴潫锛屾惡甯﹀畬鏁村唴瀹?|
 
 ---
 
-## 六、关键技术细节
+## 鍏€佸叧閿妧鏈粏鑺?
 
-### 6.1 message_id 预分配的必要性
+### 6.1 message_id 棰勫垎閰嶇殑蹇呰鎬?
 
-流式输出期间客户端需要**聚合多个 `agent:stream` 事件**到同一条消息泡，必须在第一个 token 前就确定 `message_id`。预分配流程：
+娴佸紡杈撳嚭鏈熼棿瀹㈡埛绔渶瑕?*鑱氬悎澶氫釜 `agent:stream` 浜嬩欢**鍒板悓涓€鏉℃秷鎭场锛屽繀椤诲湪绗竴涓?token 鍓嶅氨纭畾 `message_id`銆傞鍒嗛厤娴佺▼锛?
 
 ```
-预分配 message_id (UUID)
-  → 写入 DB (status=streaming, content="")
-  → 广播 agent:typing = true
-  → 流式生成（每个 token 携带 message_id 广播）
-  → 更新 DB (status=ok, content=完整内容)
-  → 广播 agent:stream_end
-  → 广播 agent:typing = false
+棰勫垎閰?message_id (UUID)
+  鈫?鍐欏叆 DB (status=streaming, content="")
+  鈫?骞挎挱 agent:typing = true
+  鈫?娴佸紡鐢熸垚锛堟瘡涓?token 鎼哄甫 message_id 骞挎挱锛?
+  鈫?鏇存柊 DB (status=ok, content=瀹屾暣鍐呭)
+  鈫?骞挎挱 agent:stream_end
+  鈫?骞挎挱 agent:typing = false
 ```
 
-### 6.2 流式输出前端渲染策略
+### 6.2 娴佸紡杈撳嚭鍓嶇娓叉煋绛栫暐
 
-- 收到第一个 `agent:stream` 时在消息列表尾部**插入占位消息**（id=message_id, status=streaming）
-- 后续每个 token 追加到占位消息的 `content` 字段（响应式更新，Vue 自动触发重新渲染）
-- 收到 `agent:stream_end` 时用 `content` 字段替换占位消息内容，`status` 改为 `ok`
-- 流式期间消息尾部显示闪烁光标（CSS `animate-pulse`）
+- 鏀跺埌绗竴涓?`agent:stream` 鏃跺湪娑堟伅鍒楄〃灏鹃儴**鎻掑叆鍗犱綅娑堟伅**锛坕d=message_id, status=streaming锛?
+- 鍚庣画姣忎釜 token 杩藉姞鍒板崰浣嶆秷鎭殑 `content` 瀛楁锛堝搷搴斿紡鏇存柊锛孷ue 鑷姩瑙﹀彂閲嶆柊娓叉煋锛?
+- 鏀跺埌 `agent:stream_end` 鏃剁敤 `content` 瀛楁鏇挎崲鍗犱綅娑堟伅鍐呭锛宍status` 鏀逛负 `ok`
+- 娴佸紡鏈熼棿娑堟伅灏鹃儴鏄剧ず闂儊鍏夋爣锛圕SS `animate-pulse`锛?
 
-### 6.3 防止 Streaming 期间用户看到空消息
+### 6.3 闃叉 Streaming 鏈熼棿鐢ㄦ埛鐪嬪埌绌烘秷鎭?
 
-- 前端在收到第一个 `agent:stream` token 时才创建占位消息（而不是在 `agent:typing` 时）
-- `agent:typing` 仅用于显示"正在输入..."指示条，不创建消息气泡
+- 鍓嶇鍦ㄦ敹鍒扮涓€涓?`agent:stream` token 鏃舵墠鍒涘缓鍗犱綅娑堟伅锛堣€屼笉鏄湪 `agent:typing` 鏃讹級
+- `agent:typing` 浠呯敤浜庢樉绀?姝ｅ湪杈撳叆..."鎸囩ず鏉★紝涓嶅垱寤烘秷鎭皵娉?
 
-### 6.4 失败处理
+### 6.4 澶辫触澶勭悊
 
-- OpenAI 兼容 API 调用失败时：`status` 更新为 `failed`，广播 `agent:stream_end` 携带 `status: "failed"`
-- 前端收到 `status: "failed"` 时：消息气泡显示为浅灰色，内容显示"（AI 暂时无法回复）"
-- 若生成过程中产生了部分内容，`content` 字段仍保存已生成的部分
-
----
-
-## 七、演示交付物
-
-**P3 演示版本 — AI 角色首次发言 Demo**
-
-**演示步骤（正常演示）：**
-1. 学生账号进入房间，发送几条消息
-2. 停止发言等待 3 分钟（演示环境改为 30 秒）
-3. 聊天区顶部出现"主持人 正在输入..."指示
-4. 随后主持人的引导性问题以打字机效果逐字出现
-5. 刷新页面，主持人发言的历史记录仍然存在
-
-**演示步骤（快速演示，使用调试接口）：**
-1. 使用 API 客户端调用 `POST /api/debug/trigger-agent?room_id={id}`
-2. 即刻看到流式输出效果
-
-**验收指标：**
-- [ ] AI 发言以流式打字机效果逐字呈现
-- [ ] `agent:typing` 指示条在生成前后正确显示/隐藏
-- [ ] AI 消息落库（刷新后历史记录有 AI 消息，status=ok）
-- [ ] 生成失败时消息状态为 failed，前端降级展示
-- [ ] 流式消息不出现乱序（token 按顺序拼接）
-- [ ] AI 发言与真实学生消息视觉样式区分清晰（角色标签颜色）
+- OpenAI 鍏煎 API 璋冪敤澶辫触鏃讹細`status` 鏇存柊涓?`failed`锛屽箍鎾?`agent:stream_end` 鎼哄甫 `status: "failed"`
+- 鍓嶇鏀跺埌 `status: "failed"` 鏃讹細娑堟伅姘旀场鏄剧ず涓烘祬鐏拌壊锛屽唴瀹规樉绀?锛圓I 鏆傛椂鏃犳硶鍥炲锛?
+- 鑻ョ敓鎴愯繃绋嬩腑浜х敓浜嗛儴鍒嗗唴瀹癸紝`content` 瀛楁浠嶄繚瀛樺凡鐢熸垚鐨勯儴鍒?
 
 ---
 
-## 八、P3 → P4 交接说明
+## 涓冦€佹紨绀轰氦浠樼墿
 
-P3 结束后，以下能力已就绪：
+**P3 婕旂ず鐗堟湰 鈥?AI 瑙掕壊棣栨鍙戣█ Demo**
 
-- ✅ `FacilitatorAgent.generate_and_push()` 完整流程已验证
-- ✅ 流式 WebSocket 事件路径已打通（`agent:stream` → 前端渲染）
-- ✅ `agent_settings.yaml` 初始框架已建立
-- ✅ `context_builder.py` 可供其他 4 个角色 Agent 复用
+**婕旂ず姝ラ锛堟甯告紨绀猴級锛?*
+1. 瀛︾敓璐﹀彿杩涘叆鎴块棿锛屽彂閫佸嚑鏉℃秷鎭?
+2. 鍋滄鍙戣█绛夊緟 3 鍒嗛挓锛堟紨绀虹幆澧冩敼涓?30 绉掞級
+3. 鑱婂ぉ鍖洪《閮ㄥ嚭鐜?涓绘寔浜?姝ｅ湪杈撳叆..."鎸囩ず
+4. 闅忓悗涓绘寔浜虹殑寮曞鎬ч棶棰樹互鎵撳瓧鏈烘晥鏋滈€愬瓧鍑虹幇
+5. 鍒锋柊椤甸潰锛屼富鎸佷汉鍙戣█鐨勫巻鍙茶褰曚粛鐒跺瓨鍦?
 
-P4 阶段需要：
-- 扩展另外 4 个角色的 Prompt 和 Agent 类
-- 将直接调用改为 Redis 任务队列 + AgentWorker 模式
-- 实现分布式锁防止多角色同时发言
+**婕旂ず姝ラ锛堝揩閫熸紨绀猴紝浣跨敤璋冭瘯鎺ュ彛锛夛細**
+1. 浣跨敤 API 瀹㈡埛绔皟鐢?`POST /api/debug/trigger-agent?room_id={id}`
+2. 鍗冲埢鐪嬪埌娴佸紡杈撳嚭鏁堟灉
+
+**楠屾敹鎸囨爣锛?*
+- [ ] AI 鍙戣█浠ユ祦寮忔墦瀛楁満鏁堟灉閫愬瓧鍛堢幇
+- [ ] `agent:typing` 鎸囩ず鏉″湪鐢熸垚鍓嶅悗姝ｇ‘鏄剧ず/闅愯棌
+- [ ] AI 娑堟伅钀藉簱锛堝埛鏂板悗鍘嗗彶璁板綍鏈?AI 娑堟伅锛宻tatus=ok锛?
+- [ ] 鐢熸垚澶辫触鏃舵秷鎭姸鎬佷负 failed锛屽墠绔檷绾у睍绀?
+- [ ] 娴佸紡娑堟伅涓嶅嚭鐜颁贡搴忥紙token 鎸夐『搴忔嫾鎺ワ級
+- [ ] AI 鍙戣█涓庣湡瀹炲鐢熸秷鎭瑙夋牱寮忓尯鍒嗘竻鏅帮紙瑙掕壊鏍囩棰滆壊锛?
+
+---
+
+## 鍏€丳3 鈫?P4 浜ゆ帴璇存槑
+
+P3 缁撴潫鍚庯紝浠ヤ笅鑳藉姏宸插氨缁細
+
+- 鉁?`FacilitatorAgent.generate_and_push()` 瀹屾暣娴佺▼宸查獙璇?
+- 鉁?娴佸紡 WebSocket 浜嬩欢璺緞宸叉墦閫氾紙`agent:stream` 鈫?鍓嶇娓叉煋锛?
+- 鉁?`agent_settings.yaml` 鍒濆妗嗘灦宸插缓绔?
+- 鉁?`context_builder.py` 鍙緵鍏朵粬 4 涓鑹?Agent 澶嶇敤
+
+P4 闃舵闇€瑕侊細
+- 鎵╁睍鍙﹀ 4 涓鑹茬殑 Prompt 鍜?Agent 绫?
+- 灏嗙洿鎺ヨ皟鐢ㄦ敼涓?Redis 浠诲姟闃熷垪 + AgentWorker 妯″紡
+- 瀹炵幇鍒嗗竷寮忛攣闃叉澶氳鑹插悓鏃跺彂瑷€

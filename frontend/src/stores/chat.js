@@ -43,6 +43,20 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
+    updateMessageContent(messageId, content) {
+      const msg = this.messages.find((m) => m.id === messageId)
+      if (msg) {
+        msg.content = content
+      }
+    },
+
+    finalizeMessage(messageId, updates) {
+      const msg = this.messages.find((m) => m.id === messageId)
+      if (msg) {
+        Object.assign(msg, updates)
+      }
+    },
+
     clearMessages() {
       this.messages = []
       this.hasMore = true
@@ -51,4 +65,3 @@ export const useChatStore = defineStore('chat', {
     },
   },
 })
-

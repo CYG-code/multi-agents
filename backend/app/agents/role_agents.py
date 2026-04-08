@@ -1,4 +1,4 @@
-import json
+﻿import json
 import time
 import uuid
 from datetime import datetime
@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sqlalchemy import update
 
-from app.agents.claude_client import stream_completion
+from app.agents.llm_client import stream_completion
 from app.config import settings
 from app.db.redis_client import get_redis_client
 from app.db.session import AsyncSessionLocal
@@ -16,7 +16,7 @@ from app.services.message_service import MessageService
 
 class FacilitatorAgent:
     ROLE = "facilitator"
-    ROLE_DISPLAY_NAME = "主持人"
+    ROLE_DISPLAY_NAME = "Facilitator"
 
     def __init__(self):
         self.model = settings.AGENT_MODEL
@@ -25,25 +25,33 @@ class FacilitatorAgent:
 
     def build_system_prompt(self, context: dict) -> str:
         return self._prompt_template.format(
-            task_description=context.get("task_description", "讨论一个社会议题"),
+            task_description=context.get("task_description", "Group discussion"),
             members_info=context.get("members_info", ""),
-            current_phase=context.get("current_phase", "第一阶段：问题分析"),
+            current_phase=context.get("current_phase", "Phase 1: problem analysis"),
         )
 
     def build_messages(self, history: list[dict]) -> list[dict]:
+        history_lines = [f"[{msg['display_name']}]: {msg['content']}" for msg in history[-30:]]
+        merged_context = "\n".join(history_lines)
+
         return [
             {
                 "role": "user",
-                "content": f"[{msg['display_name']}]: {msg['content']}",
+                "content": (
+                    "Below is the recent group discussion history. "
+                    "Please speak as the facilitator and provide one natural, concise message.\n\n"
+                    f"{merged_context}"
+                ),
             }
-            for msg in history[-30:]
-        ] + [{"role": "user", "content": "（请根据以上讨论内容，以主持人身份适时发言）"}]
+        ]
 
     async def generate_and_push(
         self,
         room_id: str,
         context: dict,
         history: list[dict],
+        source_message_id: str | None = None,
+        trigger_type: str | None = None,
     ):
         message_id = str(uuid.uuid4())
 
@@ -67,6 +75,7 @@ class FacilitatorAgent:
                 "type": "agent:typing",
                 "agent_role": self.ROLE,
                 "is_typing": True,
+                "source_message_id": source_message_id,
             },
         )
 
@@ -91,6 +100,7 @@ class FacilitatorAgent:
                         "agent_role": self.ROLE,
                         "message_id": message_id,
                         "token": token,
+                        "source_message_id": source_message_id,
                     },
                 )
         except Exception as exc:
@@ -127,6 +137,8 @@ class FacilitatorAgent:
                     "status": "ok" if success else "failed",
                     "content": full_content,
                     "created_at": datetime.utcnow().isoformat(),
+                    "source_message_id": source_message_id,
+                    "trigger_type": trigger_type,
                 },
             )
 
@@ -136,10 +148,10 @@ class FacilitatorAgent:
                     "type": "agent:typing",
                     "agent_role": self.ROLE,
                     "is_typing": False,
+                    "source_message_id": source_message_id,
                 },
             )
 
     async def _broadcast(self, room_id: str, data: dict):
         redis_client = get_redis_client()
         await redis_client.publish(f"room:{room_id}", json.dumps(data, ensure_ascii=False))
-

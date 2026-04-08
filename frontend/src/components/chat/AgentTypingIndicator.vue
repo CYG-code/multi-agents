@@ -12,7 +12,7 @@
           :style="{ animationDelay: `${i * 0.15}s` }"
         />
       </div>
-      <span>{{ typingRoles.join('、') }} 正在输入...</span>
+      <span>{{ typingRoles.join(', ') }} is typing...</span>
     </div>
   </Transition>
 </template>
@@ -24,11 +24,11 @@ import { useAgentStore } from '../../stores/agent.js'
 const agentStore = useAgentStore()
 
 const ROLE_NAMES = {
-  facilitator: '主持人',
-  devil_advocate: '批判者',
-  summarizer: '总结者',
-  resource_finder: '资源者',
-  encourager: '激励者',
+  facilitator: 'Facilitator',
+  devil_advocate: 'Devil Advocate',
+  summarizer: 'Summarizer',
+  resource_finder: 'Resource Finder',
+  encourager: 'Encourager',
 }
 
 const typingRoles = computed(() => {

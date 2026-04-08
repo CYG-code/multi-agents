@@ -50,4 +50,3 @@ async def get_recent_messages(room_id: str, limit: int = 30) -> list[dict]:
             }
             for row in rows
         ]
-

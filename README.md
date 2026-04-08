@@ -1,26 +1,6 @@
-# multi-agents
+﻿# multi-agents
 
-## Python 虚拟环境规范（前后端分离）
-
-- 仅使用一个 Python 虚拟环境：`backend/.venv`
-- `frontend/` 不使用 Python venv，依赖由 `npm` 管理
-
-目录示例：
-
-```text
-d:\Projects\multi-agents\
-├── backend\
-│   ├── .venv\
-│   ├── requirements.txt
-│   └── app\
-├── frontend\
-│   ├── node_modules\
-│   ├── package.json
-│   └── src\
-```
-
-## 后端启动（Windows PowerShell）
-
+## Backend Setup (Windows PowerShell)
 ```powershell
 cd d:\Projects\multi-agents\backend
 .\.venv\Scripts\Activate.ps1
@@ -29,46 +9,44 @@ alembic upgrade head
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
-## 环境变量说明（backend）
-
-- `backend/.env.example`：模板文件，提交到仓库
-- `backend/.env`：本地实际配置，不提交到仓库
-
-这两个文件同时存在是标准做法，不冲突。推荐流程：
-
-```powershell
-cd d:\Projects\multi-agents\backend
-Copy-Item .env.example .env
-```
-
-然后编辑 `backend/.env`。
-
-## AI 中转站（yunwu.ai）配置
-
-1. 获取令牌  
-登录后台 -> 进入“令牌”页面 -> 点击“添加令牌”获取 API Key。
-
-2. 配置环境变量（`backend/.env`）
-
-```env
-AI_API_KEY=your_token_here
-AI_BASE_URL=https://yunwu.ai
-AGENT_MODEL=selected_model_name
-```
-
-`AI_BASE_URL` 如遇客户端兼容问题，可依次尝试：
-- `https://yunwu.ai`
-- `https://yunwu.ai/v1`
-- `https://yunwu.ai/v1/chat/completions`
-
-3. 测试验证
-- 直接启动后端并在前端聊天页测试
-- 或用 Postman 调用接口测试
-
-## 前端启动
-
+## Frontend Setup
 ```powershell
 cd d:\Projects\multi-agents\frontend
 npm install
 npm run dev
 ```
+
+## Environment Files
+- `backend/.env.example`: template committed to repo
+- `backend/.env`: local runtime config (do not commit)
+
+Create local config:
+```powershell
+cd d:\Projects\multi-agents\backend
+Copy-Item .env.example .env
+```
+
+## Relay API Configuration (yunwu.ai)
+Recommended config in `backend/.env`:
+```env
+LLM_PROVIDER=openai_compatible
+AI_API_KEY=your_token_here
+AI_BASE_URL=https://yunwu.ai/v1
+AGENT_MODEL=selected_model_name
+DEBUG=true
+```
+
+Notes:
+- `AI_BASE_URL` should use `/v1` for OpenAI-compatible SDK calls.
+- If you accidentally set `https://yunwu.ai` or `https://yunwu.ai/v1/chat/completions`,
+  code now auto-normalizes it to `https://yunwu.ai/v1`.
+
+## Quick Relay Connectivity Test
+```powershell
+cd d:\Projects\multi-agents\backend
+$env:RUN_RELAY_API_TEST='1'
+python -m pytest tests/integration/test_relay_api_connection.py -q
+```
+
+Expected result:
+- `1 passed` means relay connectivity + streaming generation are both working.
