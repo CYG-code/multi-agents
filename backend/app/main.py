@@ -23,9 +23,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Multi-Agent Learning Collaboration Platform", version="1.2.0", lifespan=lifespan)
 
+cors_origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS.split(","),
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

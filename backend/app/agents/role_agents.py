@@ -1,5 +1,6 @@
-﻿import json
+import json
 import time
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +83,7 @@ class FacilitatorAgent:
         full_content = ""
         success = True
         db_update_success = False
+        error_detail = None
 
         try:
             system_prompt = self.build_system_prompt(context)
@@ -105,6 +107,8 @@ class FacilitatorAgent:
                 )
         except Exception as exc:
             print(f"[FacilitatorAgent] generation failed: {exc}")
+            traceback.print_exc()
+            error_detail = str(exc)
             success = False
         finally:
             final_status = MessageStatus.ok if success else MessageStatus.failed
@@ -119,6 +123,9 @@ class FacilitatorAgent:
                     db_update_success = True
             except Exception as exc:
                 print(f"[FacilitatorAgent] DB update failed: {exc}")
+                traceback.print_exc()
+                if not error_detail:
+                    error_detail = f"DB update failed: {exc}"
                 success = False
                 final_status = MessageStatus.failed
 
@@ -139,6 +146,7 @@ class FacilitatorAgent:
                     "created_at": datetime.utcnow().isoformat(),
                     "source_message_id": source_message_id,
                     "trigger_type": trigger_type,
+                    "error": error_detail,
                 },
             )
 

@@ -50,3 +50,26 @@ python -m pytest tests/integration/test_relay_api_connection.py -q
 
 Expected result:
 - `1 passed` means relay connectivity + streaming generation are both working.
+
+## Local/LAN Quick Switch
+Use one command to start both backend and frontend:
+
+```powershell
+cd d:\Projects\multi-agents
+.\start-dev.ps1        # local mode (127.0.0.1)
+.\start-dev.ps1 -Lan   # LAN mode (0.0.0.0)
+```
+
+You can also run each side separately:
+
+```powershell
+# backend
+cd d:\Projects\multi-agents\backend
+.\start.ps1
+.\start.ps1 -Lan
+
+# frontend
+cd d:\Projects\multi-agents\frontend
+npm run dev
+npm run dev:lan
+```
