@@ -52,15 +52,33 @@ Expected result:
 - `1 passed` means relay connectivity + streaming generation are both working.
 
 ## Local/LAN Quick Switch
-Use one command to start both backend and frontend:
+1. Local mode
+
+Start both backend and frontend from project root:
 
 ```powershell
 cd d:\Projects\multi-agents
-.\start-dev.ps1        # local mode (127.0.0.1)
-.\start-dev.ps1 -Lan   # LAN mode (0.0.0.0)
+.\start-dev.ps1
 ```
 
-You can also run each side separately:
+Visit:
+
+- `http://localhost:5173/`
+
+2. LAN mode
+
+Start both backend and frontend from project root:
+
+```powershell
+cd d:\Projects\multi-agents
+.\start-dev.ps1 -Lan
+```
+
+Visit:
+
+- `http://192.168.3.119:5173`
+
+You can also run backend/frontend separately:
 
 ```powershell
 # backend
