@@ -1,8 +1,10 @@
-﻿from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents.agent_worker import agent_worker
 from app.agents.llm_client import initialize_model_routing
 from app.analysis.scheduler import start_scheduler, stop_scheduler
 from app.config import settings
@@ -16,9 +18,16 @@ async def lifespan(app: FastAPI):
     await init_redis()
     await initialize_model_routing()
     start_scheduler()
+    worker_task = asyncio.create_task(agent_worker.run())
     try:
         yield
     finally:
+        agent_worker.stop()
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
         stop_scheduler()
         await close_redis()
 
@@ -46,3 +55,4 @@ if settings.debug_enabled:
     except ImportError:
         pass
 app.add_api_websocket_route("/ws/{room_id}", websocket_endpoint)
+

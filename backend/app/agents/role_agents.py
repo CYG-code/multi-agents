@@ -1,13 +1,17 @@
+from __future__ import annotations
+
 import json
 import time
 import traceback
 import uuid
-from datetime import datetime
+from abc import ABC
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import update
 
 from app.agents.llm_client import stream_completion
+from app.agents.settings import get_agent_settings
 from app.config import settings
 from app.db.redis_client import get_redis_client
 from app.db.session import AsyncSessionLocal
@@ -15,36 +19,53 @@ from app.models.message import Message, MessageStatus, SenderType
 from app.services.message_service import MessageService
 
 
-class FacilitatorAgent:
-    ROLE = "facilitator"
-    ROLE_DISPLAY_NAME = "Facilitator"
+class BaseRoleAgent(ABC):
+    ROLE: str = "agent"
+    ROLE_DISPLAY_NAME: str = "Agent"
+    PROMPT_FILE: str = ""
+    MAX_TOKENS: int = 512
 
     def __init__(self):
-        self.model = settings.AGENT_MODEL
-        prompt_path = Path(__file__).parent / "prompts" / "facilitator.txt"
+        if not self.PROMPT_FILE:
+            raise ValueError(f"{self.__class__.__name__} must define PROMPT_FILE.")
+        prompt_path = Path(__file__).parent / "prompts" / self.PROMPT_FILE
         self._prompt_template = prompt_path.read_text(encoding="utf-8")
 
-    def build_system_prompt(self, context: dict) -> str:
+    @property
+    def model(self) -> str:
+        model = get_agent_settings().models.role_agents.model_version
+        return model or settings.AGENT_MODEL
+
+    def build_system_prompt(self, context: dict, task: dict | None = None) -> str:
+        mention_context = ""
+        if task and task.get("trigger_type") == "mention":
+            student_name = task.get("student_name") or "某位同学"
+            mention_context = (
+                f"【附加上下文】用户 {student_name} 刚刚在聊天里 @ 了你。\n"
+                "请优先直接回应这次召唤，并保持你的角色风格。"
+            )
+
         return self._prompt_template.format(
-            task_description=context.get("task_description", "Group discussion"),
-            members_info=context.get("members_info", ""),
-            current_phase=context.get("current_phase", "Phase 1: problem analysis"),
+            task_description=context.get("task_description", "围绕当前学习任务展开讨论"),
+            members_info=context.get("members_info", "暂无成员信息"),
+            current_phase=context.get("current_phase", "阶段未知"),
+            intervention_reason=(task or {}).get("reason", "请在当前讨论中给出一次有帮助的发言"),
+            strategy=(task or {}).get("strategy", "提出一个可继续讨论的问题"),
+            mention_context=mention_context,
         )
 
     def build_messages(self, history: list[dict]) -> list[dict]:
-        history_lines = [f"[{msg['display_name']}]: {msg['content']}" for msg in history[-30:]]
-        merged_context = "\n".join(history_lines)
-
-        return [
+        formatted = [
+            {"role": "user", "content": f"[{msg['display_name']}]: {msg['content']}"}
+            for msg in history[-30:]
+        ]
+        formatted.append(
             {
                 "role": "user",
-                "content": (
-                    "Below is the recent group discussion history. "
-                    "Please speak as the facilitator and provide one natural, concise message.\n\n"
-                    f"{merged_context}"
-                ),
+                "content": f"请结合以上讨论，以{self.ROLE_DISPLAY_NAME}身份发言一次。",
             }
-        ]
+        )
+        return formatted
 
     async def generate_and_push(
         self,
@@ -53,7 +74,8 @@ class FacilitatorAgent:
         history: list[dict],
         source_message_id: str | None = None,
         trigger_type: str | None = None,
-    ):
+        task: dict | None = None,
+    ) -> None:
         message_id = str(uuid.uuid4())
 
         async with AsyncSessionLocal() as db:
@@ -77,6 +99,7 @@ class FacilitatorAgent:
                 "agent_role": self.ROLE,
                 "is_typing": True,
                 "source_message_id": source_message_id,
+                "trigger_type": trigger_type,
             },
         )
 
@@ -86,13 +109,13 @@ class FacilitatorAgent:
         error_detail = None
 
         try:
-            system_prompt = self.build_system_prompt(context)
+            system_prompt = self.build_system_prompt(context, task)
             messages = self.build_messages(history)
             async for token in stream_completion(
                 system_prompt=system_prompt,
                 messages=messages,
                 model=self.model,
-                max_tokens=512,
+                max_tokens=self.MAX_TOKENS,
             ):
                 full_content += token
                 await self._broadcast(
@@ -103,10 +126,11 @@ class FacilitatorAgent:
                         "message_id": message_id,
                         "token": token,
                         "source_message_id": source_message_id,
+                        "trigger_type": trigger_type,
                     },
                 )
         except Exception as exc:
-            print(f"[FacilitatorAgent] generation failed: {exc}")
+            print(f"[{self.__class__.__name__}] generation failed: {exc}")
             traceback.print_exc()
             error_detail = str(exc)
             success = False
@@ -122,7 +146,7 @@ class FacilitatorAgent:
                     await db.commit()
                     db_update_success = True
             except Exception as exc:
-                print(f"[FacilitatorAgent] DB update failed: {exc}")
+                print(f"[{self.__class__.__name__}] DB update failed: {exc}")
                 traceback.print_exc()
                 if not error_detail:
                     error_detail = f"DB update failed: {exc}"
@@ -143,7 +167,7 @@ class FacilitatorAgent:
                     "message_id": message_id,
                     "status": "ok" if success else "failed",
                     "content": full_content,
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                     "source_message_id": source_message_id,
                     "trigger_type": trigger_type,
                     "error": error_detail,
@@ -157,9 +181,49 @@ class FacilitatorAgent:
                     "agent_role": self.ROLE,
                     "is_typing": False,
                     "source_message_id": source_message_id,
+                    "trigger_type": trigger_type,
                 },
             )
 
-    async def _broadcast(self, room_id: str, data: dict):
+    async def _broadcast(self, room_id: str, data: dict) -> None:
         redis_client = get_redis_client()
         await redis_client.publish(f"room:{room_id}", json.dumps(data, ensure_ascii=False))
+
+
+class FacilitatorAgent(BaseRoleAgent):
+    ROLE = "facilitator"
+    ROLE_DISPLAY_NAME = "主持人"
+    PROMPT_FILE = "facilitator.txt"
+
+
+class DevilAdvocateAgent(BaseRoleAgent):
+    ROLE = "devil_advocate"
+    ROLE_DISPLAY_NAME = "批判者"
+    PROMPT_FILE = "devil_advocate.txt"
+
+
+class SummarizerAgent(BaseRoleAgent):
+    ROLE = "summarizer"
+    ROLE_DISPLAY_NAME = "总结者"
+    PROMPT_FILE = "summarizer.txt"
+
+
+class ResourceFinderAgent(BaseRoleAgent):
+    ROLE = "resource_finder"
+    ROLE_DISPLAY_NAME = "资源检索者"
+    PROMPT_FILE = "resource_finder.txt"
+
+
+class EncouragerAgent(BaseRoleAgent):
+    ROLE = "encourager"
+    ROLE_DISPLAY_NAME = "鼓励者"
+    PROMPT_FILE = "encourager.txt"
+
+
+ROLE_AGENTS: dict[str, BaseRoleAgent] = {
+    "facilitator": FacilitatorAgent(),
+    "devil_advocate": DevilAdvocateAgent(),
+    "summarizer": SummarizerAgent(),
+    "resource_finder": ResourceFinderAgent(),
+    "encourager": EncouragerAgent(),
+}

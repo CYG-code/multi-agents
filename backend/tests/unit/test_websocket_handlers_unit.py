@@ -1,4 +1,3 @@
-﻿import asyncio
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -70,40 +69,50 @@ async def test_is_room_member_returns_false_for_invalid_room_id():
 @pytest.mark.asyncio
 async def test_trigger_mentions_emits_supported_and_unsupported_events(monkeypatch):
     calls = []
-    created_roles = []
+    enqueued = []
+    user = User(
+        id=uuid.uuid4(),
+        username="student_1",
+        password_hash="x",
+        display_name="Student 1",
+        role=UserRole.student,
+    )
 
     async def _fake_broadcast(room_id, payload):
         calls.append((room_id, payload))
 
-    async def _fake_run(room_id, source_message_id, role):
-        created_roles.append((room_id, source_message_id, role))
+    async def _fake_enqueue(room_id, task, delay_seconds=0):
+        enqueued.append((room_id, task, delay_seconds))
+        return {"task_id": "task-1", **task}
 
-    def _fake_create_task(coro):
-        # Avoid un-awaited coroutine warnings while still asserting scheduling behavior.
-        role = coro.cr_frame.f_locals.get("agent_role") if coro.cr_frame else None
-        created_roles.append(("scheduled", role))
-        coro.close()
-        return SimpleNamespace(done=lambda: True)
+    class _Mention:
+        enabled = True
+        priority = 0
+        max_mentions_per_message = 1
+
+    class _Cfg:
+        mention = _Mention()
 
     monkeypatch.setattr(handlers.manager, "broadcast_to_room", _fake_broadcast)
-    monkeypatch.setattr(handlers, "_run_mentioned_agent", _fake_run)
-    monkeypatch.setattr(asyncio, "create_task", _fake_create_task)
+    monkeypatch.setattr(handlers, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(handlers, "get_agent_settings", lambda: _Cfg())
 
     await handlers._trigger_mentions(
         room_id="room-1",
         source_message_id="msg-1",
+        user=user,
         mentions=[" facilitator ", "UNKNOWN", "facilitator", ""],
     )
 
     statuses = [payload["status"] for _, payload in calls if payload["type"] == "agent:ack"]
-    assert statuses == ["accepted", "unsupported"]
+    assert statuses == ["accepted"]
     assert any(payload["type"] == "agent:queued" for _, payload in calls)
-    assert len(created_roles) == 1
-    assert created_roles[0][0] == "scheduled"
+    assert len(enqueued) == 1
+    assert enqueued[0][1]["agent_role"] == "facilitator"
 
 
 @pytest.mark.asyncio
-async def test_handle_chat_message_broadcasts_and_triggers_mentions(monkeypatch):
+async def test_handle_chat_message_broadcasts_and_triggers(monkeypatch):
     created_at = datetime.now(timezone.utc)
     msg = SimpleNamespace(
         id=uuid.uuid4(),
@@ -113,7 +122,7 @@ async def test_handle_chat_message_broadcasts_and_triggers_mentions(monkeypatch)
     )
     saved = {}
     broadcast_payloads = []
-    triggered = {}
+    triggered = {"mentions": None, "monopoly": None}
 
     async def _fake_save(_db, room_id, user_id, content, mentions):
         saved["room_id"] = room_id
@@ -125,10 +134,11 @@ async def test_handle_chat_message_broadcasts_and_triggers_mentions(monkeypatch)
     async def _fake_broadcast(_room_id, payload):
         broadcast_payloads.append(payload)
 
-    async def _fake_trigger(room_id, source_message_id, mentions):
-        triggered["room_id"] = room_id
-        triggered["source_message_id"] = source_message_id
-        triggered["mentions"] = mentions
+    async def _fake_trigger_mentions(room_id, source_message_id, user, mentions):
+        triggered["mentions"] = (room_id, source_message_id, user.display_name, mentions)
+
+    async def _fake_check_monopoly(room_id, sender_id):
+        triggered["monopoly"] = (room_id, sender_id)
 
     user = User(
         id=uuid.uuid4(),
@@ -140,7 +150,8 @@ async def test_handle_chat_message_broadcasts_and_triggers_mentions(monkeypatch)
 
     monkeypatch.setattr(handlers.MessageService, "save_student_message", _fake_save)
     monkeypatch.setattr(handlers.manager, "broadcast_to_room", _fake_broadcast)
-    monkeypatch.setattr(handlers, "_trigger_mentions", _fake_trigger)
+    monkeypatch.setattr(handlers, "_trigger_mentions", _fake_trigger_mentions)
+    monkeypatch.setattr(handlers.trigger_detector, "check_monopoly", _fake_check_monopoly)
     monkeypatch.setattr(handlers, "get_redis_client", lambda: (_ for _ in ()).throw(RuntimeError("redis down")))
 
     await handlers.handle_chat_message(
@@ -154,5 +165,6 @@ async def test_handle_chat_message_broadcasts_and_triggers_mentions(monkeypatch)
     assert saved["mentions"] == ["facilitator"]
     assert broadcast_payloads[0]["type"] == "chat:new_message"
     assert broadcast_payloads[0]["seq_num"] == 12
-    assert triggered["mentions"] == ["facilitator"]
-    assert triggered["source_message_id"] == str(msg.id)
+    assert triggered["mentions"][3] == ["facilitator"]
+    assert triggered["monopoly"] == ("room-1", str(user.id))
+

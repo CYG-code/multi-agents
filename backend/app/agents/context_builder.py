@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from sqlalchemy import select
 
 from app.db.session import AsyncSessionLocal
@@ -46,7 +48,19 @@ async def get_recent_messages(room_id: str, limit: int = 30) -> list[dict]:
             {
                 "content": row.Message.content,
                 "display_name": row.display_name or f"[{row.Message.agent_role}]",
+                "sender_id": str(row.Message.sender_id) if row.Message.sender_id else None,
                 "sender_type": row.Message.sender_type.value,
             }
             for row in rows
         ]
+
+
+async def get_room_members(room_id: str) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User.id, User.display_name)
+            .join(RoomMember, User.id == RoomMember.user_id)
+            .where(RoomMember.room_id == room_id)
+        )
+        return [{"id": str(row.id), "display_name": row.display_name} for row in result.fetchall()]
+

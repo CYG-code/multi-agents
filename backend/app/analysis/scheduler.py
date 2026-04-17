@@ -1,80 +1,30 @@
-﻿import asyncio
+from __future__ import annotations
+
 import time
-from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import yaml
 
-from app.agents.context_builder import get_recent_messages, get_room_context
+from app.agents.committee import basic_committee
 from app.agents.llm_client import refresh_model_routing
-from app.agents.role_agents import FacilitatorAgent
+from app.agents.queue import enqueue_task
+from app.agents.settings import get_agent_settings
 from app.db.redis_client import get_redis_client
 
 scheduler = AsyncIOScheduler()
-facilitator = FacilitatorAgent()
-
-DEFAULT_SILENCE_TRIGGER_ENABLED = True
-DEFAULT_SILENCE_THRESHOLD_SECONDS = 180
-DEFAULT_WARMUP_MINUTES = 2
-
-_SETTINGS_PATH = Path(__file__).resolve().parent.parent / "agents" / "agent_settings.yaml"
 
 
-def _to_bool(value, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    lowered = str(value).strip().lower()
-    if lowered in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if lowered in {"0", "false", "no", "off", "disabled"}:
-        return False
-    return default
-
-
-def _load_timing_config() -> tuple[bool, int, int]:
-    try:
-        raw = yaml.safe_load(_SETTINGS_PATH.read_text(encoding="utf-8")) or {}
-        timing = raw.get("timing", {})
-
-        silence_enabled = _to_bool(
-            timing.get("silence_trigger_enabled", DEFAULT_SILENCE_TRIGGER_ENABLED),
-            DEFAULT_SILENCE_TRIGGER_ENABLED,
-        )
-
-        silence_threshold = int(timing.get("silence_threshold_seconds", DEFAULT_SILENCE_THRESHOLD_SECONDS))
-        warmup_minutes = int(timing.get("warmup_minutes", DEFAULT_WARMUP_MINUTES))
-
-        if silence_threshold <= 0:
-            silence_threshold = DEFAULT_SILENCE_THRESHOLD_SECONDS
-        if warmup_minutes < 0:
-            warmup_minutes = DEFAULT_WARMUP_MINUTES
-
-        return silence_enabled, silence_threshold, warmup_minutes
-    except Exception:
-        return DEFAULT_SILENCE_TRIGGER_ENABLED, DEFAULT_SILENCE_THRESHOLD_SECONDS, DEFAULT_WARMUP_MINUTES
-
-
-def _normalize_room_id(value) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
-
-
-async def check_silence():
-    silence_enabled, silence_threshold_seconds, warmup_minutes = _load_timing_config()
-    if not silence_enabled:
+async def check_silence() -> None:
+    cfg = get_agent_settings()
+    if not cfg.timing.silence_trigger_enabled:
         return
 
-    warmup_seconds = warmup_minutes * 60
-    trigger_lock_ttl_seconds = silence_threshold_seconds + 60
-
     redis_client = get_redis_client()
-    active_rooms_raw = await redis_client.smembers("active_rooms")
-    active_rooms = [_normalize_room_id(room_id) for room_id in active_rooms_raw]
+    active_rooms = await redis_client.smembers("active_rooms")
 
     now = time.time()
+    warmup_seconds = cfg.timing.warmup_minutes * 60
+    lock_ttl = cfg.timing.silence_threshold_seconds + 60
+
     for room_id in active_rooms:
         last_msg_time = await redis_client.get(f"room:{room_id}:last_msg_time")
         if not last_msg_time:
@@ -84,33 +34,60 @@ async def check_silence():
         if room_start_time and (now - float(room_start_time) < warmup_seconds):
             continue
 
-        silence_duration = now - float(last_msg_time)
-        if silence_duration >= silence_threshold_seconds:
-            lock_key = f"trigger_lock:{room_id}:silence"
-            if not await redis_client.exists(lock_key):
-                # Lock at least one silence cycle to avoid repeated trigger loops.
-                await redis_client.setex(lock_key, trigger_lock_ttl_seconds, "1")
-                context = await get_room_context(room_id)
-                history = await get_recent_messages(room_id)
-                asyncio.create_task(
-                    facilitator.generate_and_push(
-                        room_id,
-                        context,
-                        history,
-                        source_message_id=None,
-                        trigger_type="silence",
-                    )
-                )
+        silence = now - float(last_msg_time)
+        if silence < cfg.timing.silence_threshold_seconds:
+            continue
+
+        lock_key = f"trigger_lock:{room_id}:silence"
+        if await redis_client.exists(lock_key):
+            continue
+
+        await redis_client.setex(lock_key, lock_ttl, "1")
+        await enqueue_task(
+            room_id,
+            {
+                "room_id": room_id,
+                "agent_role": "facilitator",
+                "reason": f"房间沉默已超过 {int(silence)} 秒，需要重新推动讨论。",
+                "strategy": "提出一个具体问题，邀请成员基于已有观点给出下一步分析。",
+                "priority": 2,
+                "trigger_type": "silence",
+                "triggered_at": now,
+            },
+        )
 
 
-def start_scheduler():
+async def check_committee_timer() -> None:
+    redis_client = get_redis_client()
+    active_rooms = await redis_client.smembers("active_rooms")
+    for room_id in active_rooms:
+        await basic_committee.analyze_and_dispatch(room_id)
+
+
+def start_scheduler() -> None:
     if scheduler.running:
         return
-    scheduler.add_job(check_silence, "interval", seconds=30)
-    scheduler.add_job(refresh_model_routing, "interval", seconds=300)
+
+    cfg = get_agent_settings()
+    scheduler.add_job(check_silence, "interval", seconds=30, id="check_silence", replace_existing=True)
+    scheduler.add_job(
+        check_committee_timer,
+        "interval",
+        minutes=max(1, cfg.timing.analysis_interval_minutes),
+        id="check_committee",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        refresh_model_routing,
+        "interval",
+        seconds=300,
+        id="refresh_model_routing",
+        replace_existing=True,
+    )
     scheduler.start()
 
 
-def stop_scheduler():
+def stop_scheduler() -> None:
     if scheduler.running:
         scheduler.shutdown()
+

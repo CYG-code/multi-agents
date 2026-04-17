@@ -1,4 +1,6 @@
-﻿import asyncio
+from __future__ import annotations
+
+import time
 from uuid import UUID
 
 from fastapi import Depends, WebSocket, WebSocketDisconnect
@@ -7,8 +9,10 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.context_builder import get_recent_messages, get_room_context
-from app.agents.role_agents import FacilitatorAgent
+from app.agents.queue import enqueue_task
+from app.agents.role_agents import ROLE_AGENTS
+from app.agents.settings import get_agent_settings
+from app.analysis.triggers import trigger_detector
 from app.db.redis_client import get_redis_client
 from app.db.session import get_db
 from app.models.room_member import RoomMember
@@ -19,11 +23,6 @@ from app.services.message_service import MessageService
 from app.websocket.manager import ConnectionManager
 
 manager = ConnectionManager()
-
-facilitator_agent = FacilitatorAgent()
-SUPPORTED_MENTION_AGENTS = {
-    "facilitator": facilitator_agent,
-}
 
 
 async def verify_token(token: str, db: AsyncSession) -> User | None:
@@ -58,6 +57,10 @@ async def is_room_member(user_id: UUID, room_id: str, db: AsyncSession) -> bool:
 def _normalized_mentions(mentions: list[str] | None) -> list[str]:
     if not mentions:
         return []
+
+    cfg = get_agent_settings()
+    max_mentions = max(1, cfg.mention.max_mentions_per_message)
+
     normalized = []
     seen = set()
     for raw in mentions:
@@ -66,36 +69,18 @@ def _normalized_mentions(mentions: list[str] | None) -> list[str]:
             continue
         seen.add(role)
         normalized.append(role)
+        if len(normalized) >= max_mentions:
+            break
     return normalized
 
 
-async def _run_mentioned_agent(room_id: str, source_message_id: str, agent_role: str) -> None:
-    await manager.broadcast_to_room(
-        room_id,
-        {
-            "type": "agent:thinking",
-            "agent_role": agent_role,
-            "source_message_id": source_message_id,
-            "status": "thinking",
-            "message": "智能体正在思考中...",
-        },
-    )
+async def _trigger_mentions(room_id: str, source_message_id: str, user: User, mentions: list[str] | None) -> None:
+    cfg = get_agent_settings()
+    if not cfg.mention.enabled:
+        return
 
-    context = await get_room_context(room_id)
-    history = await get_recent_messages(room_id)
-    agent = SUPPORTED_MENTION_AGENTS[agent_role]
-    await agent.generate_and_push(
-        room_id,
-        context,
-        history,
-        source_message_id=source_message_id,
-        trigger_type="mention",
-    )
-
-
-async def _trigger_mentions(room_id: str, source_message_id: str, mentions: list[str] | None) -> None:
     for role in _normalized_mentions(mentions):
-        if role not in SUPPORTED_MENTION_AGENTS:
+        if role not in ROLE_AGENTS:
             await manager.broadcast_to_room(
                 room_id,
                 {
@@ -119,6 +104,21 @@ async def _trigger_mentions(room_id: str, source_message_id: str, mentions: list
             },
         )
 
+        task = await enqueue_task(
+            room_id,
+            {
+                "room_id": room_id,
+                "agent_role": role,
+                "reason": f"学生 {user.display_name} 通过 @{role} 主动召唤。",
+                "strategy": "优先回应该同学的提问，并给出可继续讨论的下一步。",
+                "priority": cfg.mention.priority,
+                "trigger_type": "mention",
+                "student_name": user.display_name,
+                "source_message_id": source_message_id,
+                "triggered_at": time.time(),
+            },
+        )
+
         await manager.broadcast_to_room(
             room_id,
             {
@@ -126,11 +126,10 @@ async def _trigger_mentions(room_id: str, source_message_id: str, mentions: list
                 "agent_role": role,
                 "source_message_id": source_message_id,
                 "status": "queued",
+                "task_id": task["task_id"],
                 "message": "已进入处理队列。",
             },
         )
-
-        asyncio.create_task(_run_mentioned_agent(room_id, source_message_id, role))
 
 
 async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSession) -> None:
@@ -141,7 +140,6 @@ async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSes
 
     content = frame.content.strip()
     mentions = frame.mentions
-
     if not content:
         return
 
@@ -172,19 +170,20 @@ async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSes
         },
     )
 
-    await _trigger_mentions(room_id, str(msg.id), mentions)
+    await trigger_detector.check_monopoly(room_id, str(user.id))
+    await _trigger_mentions(room_id, str(msg.id), user, mentions)
 
 
 async def websocket_endpoint(
     websocket: WebSocket,
     room_id: str,
     db: AsyncSession = Depends(get_db),
-):
+) -> None:
     await websocket.accept()
 
     try:
-        auth_data = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
-    except asyncio.TimeoutError:
+        auth_data = await websocket.receive_json()
+    except Exception:
         await websocket.close(code=4002, reason="Auth timeout")
         return
 
@@ -205,7 +204,6 @@ async def websocket_endpoint(
 
     redis_client = get_redis_client()
     online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
-
     await manager.broadcast_to_room(
         room_id,
         {
@@ -223,7 +221,6 @@ async def websocket_endpoint(
                 await handle_chat_message(data, room_id, user, db)
     except WebSocketDisconnect:
         await manager.disconnect(websocket, room_id, str(user.id))
-
         online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
         await manager.broadcast_to_room(
             room_id,
@@ -234,3 +231,4 @@ async def websocket_endpoint(
                 "online_count": online_count,
             },
         )
+

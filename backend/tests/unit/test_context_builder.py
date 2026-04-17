@@ -1,5 +1,3 @@
-import types
-
 import pytest
 
 from app.agents import context_builder
