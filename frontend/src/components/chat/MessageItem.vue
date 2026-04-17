@@ -19,7 +19,7 @@
       </div>
 
       <div class="bg-gray-50 border border-gray-200 rounded-2xl rounded-tl-sm px-3 py-2 text-sm text-gray-800">
-        {{ message.content }}
+        <span class="message-markdown" v-html="renderedContent" />
         <span
           v-if="message.status === 'streaming'"
           class="inline-block w-0.5 h-4 bg-gray-600 animate-pulse ml-0.5"
@@ -46,7 +46,7 @@
             : 'bg-white border border-gray-200 text-gray-800 rounded-tl-sm',
         ]"
       >
-        {{ message.content }}
+        <span class="message-markdown" v-html="renderedContent" />
       </div>
 
       <span class="text-xs text-gray-400 mt-1">{{ formatTime(message.created_at) }}</span>
@@ -92,6 +92,25 @@ const avatarText = computed(() => {
   return first ? first.toUpperCase() : '?'
 })
 
+const renderedContent = computed(() => renderBasicMarkdown(props.message.content || ''))
+
+function escapeHtml(text) {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function renderBasicMarkdown(text) {
+  const safe = escapeHtml(text)
+
+  // Support **bold** while keeping output XSS-safe.
+  const withBold = safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+  return withBold.replace(/\r?\n/g, '<br />')
+}
+
 function formatTime(value) {
   if (!value) return ''
   const date = new Date(value)
@@ -99,3 +118,9 @@ function formatTime(value) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 </script>
+
+<style scoped>
+.message-markdown :deep(strong) {
+  font-weight: 700;
+}
+</style>
