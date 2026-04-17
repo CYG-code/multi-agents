@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import yaml
 
 from app.agents.context_builder import get_recent_messages, get_room_context
+from app.agents.llm_client import refresh_model_routing
 from app.agents.role_agents import FacilitatorAgent
 from app.db.redis_client import get_redis_client
 
@@ -106,6 +107,7 @@ def start_scheduler():
     if scheduler.running:
         return
     scheduler.add_job(check_silence, "interval", seconds=30)
+    scheduler.add_job(refresh_model_routing, "interval", seconds=300)
     scheduler.start()
 
 

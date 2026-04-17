@@ -1,6 +1,6 @@
-﻿# multi-agents
+# multi-agents
 
-## Backend Setup (Windows PowerShell)
+## 后端启动（Windows PowerShell）
 ```powershell
 cd d:\Projects\multi-agents\backend
 .\.venv\Scripts\Activate.ps1
@@ -9,25 +9,25 @@ alembic upgrade head
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
-## Frontend Setup
+## 前端启动
 ```powershell
 cd d:\Projects\multi-agents\frontend
 npm install
 npm run dev
 ```
 
-## Environment Files
-- `backend/.env.example`: template committed to repo
-- `backend/.env`: local runtime config (do not commit)
+## 环境变量文件
+- `backend/.env.example`：已提交到仓库的模板文件
+- `backend/.env`：本地运行配置（不要提交）
 
-Create local config:
+创建本地配置：
 ```powershell
 cd d:\Projects\multi-agents\backend
 Copy-Item .env.example .env
 ```
 
-## Relay API Configuration (yunwu.ai)
-Recommended config in `backend/.env`:
+## Relay API 配置（yunwu.ai）
+`backend/.env` 推荐配置：
 ```env
 LLM_PROVIDER=openai_compatible
 AI_API_KEY=your_token_here
@@ -36,49 +36,49 @@ AGENT_MODEL=selected_model_name
 DEBUG=true
 ```
 
-Notes:
-- `AI_BASE_URL` should use `/v1` for OpenAI-compatible SDK calls.
-- If you accidentally set `https://yunwu.ai` or `https://yunwu.ai/v1/chat/completions`,
-  code now auto-normalizes it to `https://yunwu.ai/v1`.
+说明：
+- `AI_BASE_URL` 需要使用带 `/v1` 的地址，以兼容 OpenAI 风格 SDK 调用。
+- 如果你误填为 `https://yunwu.ai` 或 `https://yunwu.ai/v1/chat/completions`，
+  代码现在会自动规范化为 `https://yunwu.ai/v1`。
 
-## Quick Relay Connectivity Test
+## Relay 连通性快速测试
 ```powershell
 cd d:\Projects\multi-agents\backend
 $env:RUN_RELAY_API_TEST='1'
 python -m pytest tests/integration/test_relay_api_connection.py -q
 ```
 
-Expected result:
-- `1 passed` means relay connectivity + streaming generation are both working.
+期望结果：
+- 出现 `1 passed` 表示 Relay 连通性和流式生成功能都正常。
 
-## Local/LAN Quick Switch
-1. Local mode
+## 本机 / 局域网快速切换
+1. 本机模式
 
-Start both backend and frontend from project root:
+在项目根目录同时启动后端和前端：
 
 ```powershell
 cd d:\Projects\multi-agents
 .\start-dev.ps1
 ```
 
-Visit:
+访问：
 
 - `http://localhost:5173/`
 
-2. LAN mode
+2. 局域网模式
 
-Start both backend and frontend from project root:
+在项目根目录同时启动后端和前端：
 
 ```powershell
 cd d:\Projects\multi-agents
 .\start-dev.ps1 -Lan
 ```
 
-Visit:
+访问：
 
 - `http://192.168.3.119:5173`
 
-You can also run backend/frontend separately:
+你也可以分别启动后端和前端：
 
 ```powershell
 # backend

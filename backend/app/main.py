@@ -1,8 +1,9 @@
-from contextlib import asynccontextmanager
+﻿from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents.llm_client import initialize_model_routing
 from app.analysis.scheduler import start_scheduler, stop_scheduler
 from app.config import settings
 from app.db.redis_client import close_redis, init_redis
@@ -13,6 +14,7 @@ from app.websocket.handlers import websocket_endpoint
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_redis()
+    await initialize_model_routing()
     start_scheduler()
     try:
         yield
