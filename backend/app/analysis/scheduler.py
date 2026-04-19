@@ -15,7 +15,9 @@ scheduler = AsyncIOScheduler()
 
 async def check_silence() -> None:
     cfg = get_agent_settings()
-    if not cfg.timing.silence_trigger_enabled:
+    auto_speak = getattr(cfg, "auto_speak", None)
+    facilitator_silence_enabled = True if auto_speak is None else getattr(auto_speak, "facilitator_silence_enabled", True)
+    if not cfg.timing.silence_trigger_enabled or not facilitator_silence_enabled:
         return
 
     redis_client = get_redis_client()
@@ -58,6 +60,12 @@ async def check_silence() -> None:
 
 
 async def check_committee_timer() -> None:
+    cfg = get_agent_settings()
+    auto_speak = getattr(cfg, "auto_speak", None)
+    committee_enabled = True if auto_speak is None else getattr(auto_speak, "committee_enabled", True)
+    if not committee_enabled:
+        return
+
     redis_client = get_redis_client()
     active_rooms = await redis_client.smembers("active_rooms")
     for room_id in active_rooms:

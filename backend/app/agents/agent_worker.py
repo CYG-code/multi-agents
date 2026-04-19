@@ -47,6 +47,13 @@ class AgentWorker:
             return
 
         cfg = get_agent_settings()
+        if not self._is_task_enabled(cfg, task, agent_role):
+            print(
+                f"[AgentWorker] drop disabled task room={room_id} role={agent_role} "
+                f"trigger={task.get('trigger_type')} task_id={task.get('task_id')}"
+            )
+            return
+
         redis_client = get_redis_client()
 
         hourly_key = f"interventions:{room_id}:{int(time.time() // 3600)}"
@@ -92,6 +99,51 @@ class AgentWorker:
             if current_lock == WORKER_ID:
                 await redis_client.delete(lock_key)
 
+    @staticmethod
+    def _is_task_enabled(cfg, task: dict, agent_role: str) -> bool:
+        trigger_type = (task.get("trigger_type") or "").strip().lower()
+        auto_speak = getattr(cfg, "auto_speak", None)
+
+        # Silence-triggered facilitator intervention.
+        if trigger_type == "silence" and agent_role == "facilitator":
+            facilitator_silence_enabled = (
+                True if auto_speak is None else getattr(auto_speak, "facilitator_silence_enabled", True)
+            )
+            return bool(getattr(cfg.timing, "silence_trigger_enabled", True) and facilitator_silence_enabled)
+
+        # Monopoly-triggered encourager intervention.
+        if trigger_type == "monopoly" and agent_role == "encourager":
+            monopoly_enabled = True if auto_speak is None else getattr(auto_speak, "monopoly_encourager_enabled", True)
+            return bool(monopoly_enabled)
+
+        # Committee-triggered interventions.
+        if trigger_type == "committee":
+            committee_enabled = True if auto_speak is None else getattr(auto_speak, "committee_enabled", True)
+            if not committee_enabled:
+                return False
+
+            if agent_role == "devil_advocate":
+                return bool(
+                    True
+                    if auto_speak is None
+                    else getattr(auto_speak, "committee_devil_advocate_enabled", True)
+                )
+            if agent_role == "summarizer":
+                return bool(
+                    True
+                    if auto_speak is None
+                    else getattr(auto_speak, "committee_summarizer_enabled", True)
+                )
+            if agent_role == "encourager":
+                return bool(
+                    True
+                    if auto_speak is None
+                    else getattr(auto_speak, "committee_encourager_enabled", True)
+                )
+            return True
+
+        # Mention/debug/manual task types are intentionally not auto-speak gated.
+        return True
+
 
 agent_worker = AgentWorker()
-

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import select
 
 from app.db.session import AsyncSessionLocal
@@ -8,6 +10,18 @@ from app.models.room import Room
 from app.models.room_member import RoomMember
 from app.models.task import Task
 from app.models.user import User
+
+
+def _format_task_workflow(scripts) -> str:
+    if scripts is None:
+        return "未提供任务流程"
+    if isinstance(scripts, str):
+        text = scripts.strip()
+        return text or "未提供任务流程"
+    try:
+        return json.dumps(scripts, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(scripts)
 
 
 async def get_room_context(room_id: str) -> dict:
@@ -22,8 +36,12 @@ async def get_room_context(room_id: str) -> dict:
         )
         members = [r[0] for r in result.fetchall()]
 
+        task_description = (task.requirements or "").strip() if task else ""
+        task_workflow = _format_task_workflow(task.scripts if task else None)
+
         return {
-            "task_description": task.requirements if task else "讨论一个社会议题",
+            "task_description": task_description or "讨论一个社会议题",
+            "task_workflow": task_workflow,
             "members_info": "、".join(members),
             "current_phase": "第一阶段：问题分析",
         }
@@ -63,4 +81,3 @@ async def get_room_members(room_id: str) -> list[dict]:
             .where(RoomMember.room_id == room_id)
         )
         return [{"id": str(row.id), "display_name": row.display_name} for row in result.fetchall()]
-

@@ -10,6 +10,11 @@ from app.db.redis_client import get_redis_client
 class TriggerDetector:
     async def check_monopoly(self, room_id: str, sender_id: str) -> None:
         cfg = get_agent_settings()
+        auto_speak = getattr(cfg, "auto_speak", None)
+        monopoly_encourager_enabled = True if auto_speak is None else getattr(auto_speak, "monopoly_encourager_enabled", True)
+        if not monopoly_encourager_enabled:
+            return
+
         threshold = max(2, int(cfg.thresholds.monopoly_message_count))
 
         redis_client = get_redis_client()

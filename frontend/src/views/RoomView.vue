@@ -9,7 +9,6 @@
     </button>
 
     <div class="w-[35%] flex flex-col gap-2 p-2 border-r border-gray-200">
-      <DiscussionArea class="flex-1" />
       <WritingArea class="flex-1" />
     </div>
 
@@ -18,23 +17,65 @@
     </div>
 
     <div class="w-[30%] flex flex-col gap-2 p-2">
-      <TaskRequirements class="flex-1" />
-      <TaskScript class="flex-1" />
+      <TaskRequirements
+        class="flex-1"
+        :task="roomStore.currentTask"
+        :loading="roomStore.loadingContext"
+        :error="roomStore.contextError"
+        :editable="authStore.isTeacher"
+        :saving="roomStore.savingTask"
+        :save-error="roomStore.taskSaveError"
+        :save-success="taskSaveSuccess"
+        @save="saveTaskPatch"
+      />
+      <TaskScript
+        class="flex-1"
+        :task="roomStore.currentTask"
+        :loading="roomStore.loadingContext"
+        :error="roomStore.contextError"
+        :editable="authStore.isTeacher"
+        :saving="roomStore.savingTask"
+        :save-error="roomStore.taskSaveError"
+        :save-success="taskSaveSuccess"
+        @save="saveTaskPatch"
+      />
     </div>
   </div>
 </template>
 
 <script setup>
-import { useRouter } from 'vue-router'
-import DiscussionArea from '../components/layout/DiscussionArea.vue'
+import { computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth.js'
+import { useRoomStore } from '../stores/room.js'
 import WritingArea from '../components/layout/WritingArea.vue'
 import ChatPanel from '../components/chat/ChatPanel.vue'
 import TaskRequirements from '../components/task/TaskRequirements.vue'
 import TaskScript from '../components/task/TaskScript.vue'
 
+const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
+const roomStore = useRoomStore()
+const taskSaveSuccess = computed(
+  () => !!roomStore.taskSaveSuccessAt && !roomStore.savingTask && !roomStore.taskSaveError
+)
+
+function loadRoomContext() {
+  const roomId = String(route.params.id || '')
+  if (!roomId) return
+  roomStore.loadRoomContext(roomId)
+}
 
 function leaveRoom() {
   router.push('/lobby')
 }
+
+async function saveTaskPatch(patch) {
+  if (!authStore.isTeacher) return
+  await roomStore.updateCurrentTask(patch)
+}
+
+onMounted(loadRoomContext)
+watch(() => route.params.id, loadRoomContext)
 </script>

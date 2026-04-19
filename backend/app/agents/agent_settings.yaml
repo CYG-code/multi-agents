@@ -1,5 +1,5 @@
 timing:
-  silence_trigger_enabled: true
+  silence_trigger_enabled: false
   silence_threshold_seconds: 180
   analysis_interval_minutes: 5
   warmup_minutes: 2
@@ -32,3 +32,11 @@ mention:
   enabled: true
   priority: 0
   max_mentions_per_message: 1
+
+auto_speak:
+  facilitator_silence_enabled: false
+  committee_enabled: false
+  monopoly_encourager_enabled: false
+  committee_devil_advocate_enabled: false
+  committee_summarizer_enabled: false
+  committee_encourager_enabled: false

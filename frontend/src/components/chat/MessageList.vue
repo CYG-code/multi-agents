@@ -11,7 +11,7 @@
 </template>
 
 <script setup>
-import { defineExpose, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import MessageItem from './MessageItem.vue'
 
 const props = defineProps({

@@ -80,9 +80,19 @@ class BasicCommittee:
 
     def _dispatch(self, cognitive: dict, emotional: dict, interaction: dict) -> list[dict]:
         cfg = get_agent_settings()
+        auto_speak = getattr(cfg, "auto_speak", None)
+        committee_devil_advocate_enabled = (
+            True if auto_speak is None else getattr(auto_speak, "committee_devil_advocate_enabled", True)
+        )
+        committee_summarizer_enabled = (
+            True if auto_speak is None else getattr(auto_speak, "committee_summarizer_enabled", True)
+        )
+        committee_encourager_enabled = (
+            True if auto_speak is None else getattr(auto_speak, "committee_encourager_enabled", True)
+        )
         interventions = []
 
-        if cognitive["diversity_score"] < cfg.thresholds.diversity_score_threshold:
+        if committee_devil_advocate_enabled and cognitive["diversity_score"] < cfg.thresholds.diversity_score_threshold:
             interventions.append(
                 {
                     "role": "devil_advocate",
@@ -95,7 +105,7 @@ class BasicCommittee:
                 }
             )
 
-        if emotional["emotion_flags"]["conflict"]:
+        if committee_summarizer_enabled and emotional["emotion_flags"]["conflict"]:
             interventions.append(
                 {
                     "role": "summarizer",
@@ -105,7 +115,11 @@ class BasicCommittee:
                 }
             )
 
-        if emotional["emotion_flags"]["passive"] and interaction["balance_score"] < cfg.thresholds.balance_score_threshold:
+        if (
+            committee_encourager_enabled
+            and emotional["emotion_flags"]["passive"]
+            and interaction["balance_score"] < cfg.thresholds.balance_score_threshold
+        ):
             interventions.append(
                 {
                     "role": "encourager",
@@ -119,4 +133,3 @@ class BasicCommittee:
 
 
 basic_committee = BasicCommittee()
-

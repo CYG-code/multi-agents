@@ -47,6 +47,7 @@ class BaseRoleAgent(ABC):
 
         return self._prompt_template.format(
             task_description=context.get("task_description", "围绕当前学习任务展开讨论"),
+            task_workflow=context.get("task_workflow", "未提供任务流程"),
             members_info=context.get("members_info", "暂无成员信息"),
             current_phase=context.get("current_phase", "阶段未知"),
             intervention_reason=(task or {}).get("reason", "请在当前讨论中给出一次有帮助的发言"),

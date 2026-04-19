@@ -33,6 +33,15 @@ class MentionConfig(BaseModel):
     max_mentions_per_message: int = 1
 
 
+class AutoSpeakConfig(BaseModel):
+    facilitator_silence_enabled: bool = True
+    committee_enabled: bool = True
+    monopoly_encourager_enabled: bool = True
+    committee_devil_advocate_enabled: bool = True
+    committee_summarizer_enabled: bool = True
+    committee_encourager_enabled: bool = True
+
+
 class ModelConfigItem(BaseModel):
     model_version: str = settings.AGENT_MODEL
     history_token_budget: int = 4000
@@ -51,6 +60,7 @@ class AgentSettings(BaseModel):
     thresholds: ThresholdsConfig = Field(default_factory=ThresholdsConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     mention: MentionConfig = Field(default_factory=MentionConfig)
+    auto_speak: AutoSpeakConfig = Field(default_factory=AutoSpeakConfig)
 
 
 def get_agent_settings(force_reload: bool = False) -> AgentSettings:

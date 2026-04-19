@@ -13,6 +13,14 @@ class RoomUpdate(BaseModel):
     status: RoomStatus
 
 
+class RoomDeleteRequest(BaseModel):
+    confirm_name: str
+
+
+class RoomTaskBindRequest(BaseModel):
+    task_id: UUID
+
+
 class RoomResponse(BaseModel):
     id: UUID
     name: str

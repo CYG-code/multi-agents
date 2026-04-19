@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.dependencies import get_current_user, require_teacher
 from app.models.user import User
-from app.schemas.task import TaskCreate, TaskResponse
+from app.schemas.task import TaskCreate, TaskResponse, TaskUpdate
 from app.services import task_service
 
 router = APIRouter()
@@ -40,4 +40,19 @@ async def get_task(
     task = await task_service.get_task(db, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    return TaskResponse.model_validate(task)
+
+
+@router.patch("/{task_id}", response_model=TaskResponse)
+async def patch_task(
+    task_id: UUID,
+    data: TaskUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_teacher),
+):
+    task = await task_service.get_task(db, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    task = await task_service.update_task(db, task, data)
     return TaskResponse.model_validate(task)

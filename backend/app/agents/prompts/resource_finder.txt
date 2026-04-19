@@ -6,6 +6,7 @@
 
 【协作背景】
 任务描述：{task_description}
+任务流程：{task_workflow}
 小组成员：{members_info}
 当前阶段：{current_phase}
 

@@ -1,18 +1,19 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.redis_client import get_redis_client
 from app.db.session import get_db
 from app.dependencies import get_current_user, require_teacher
 from app.exceptions import RoomMemberForbiddenError, RoomNotFoundError
 from app.models.room_member import RoomMember
 from app.models.user import User
 from app.schemas.message import MessageHistoryResponse
-from app.schemas.room import RoomCreate, RoomResponse, RoomUpdate
-from app.services import room_service
+from app.schemas.room import RoomCreate, RoomDeleteRequest, RoomResponse, RoomTaskBindRequest, RoomUpdate
+from app.services import room_service, task_service
 from app.services.message_service import MessageService
 
 router = APIRouter()
@@ -83,7 +84,67 @@ async def update_room(
     if not room:
         raise RoomNotFoundError()
     room = await room_service.update_room_status(db, room, data.status)
-    return RoomResponse.model_validate(room)
+    count = await room_service.get_member_count(db, room.id)
+    resp = RoomResponse.model_validate(room)
+    resp.member_count = count
+    return resp
+
+
+@router.patch("/{room_id}/task", response_model=RoomResponse)
+async def bind_room_task(
+    room_id: UUID,
+    data: RoomTaskBindRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_teacher),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+
+    task = await task_service.get_task(db, data.task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    room = await room_service.bind_room_task(db, room, data.task_id)
+    count = await room_service.get_member_count(db, room.id)
+    resp = RoomResponse.model_validate(room)
+    resp.member_count = count
+    return resp
+
+
+@router.delete("/{room_id}", status_code=200)
+async def delete_room(
+    room_id: UUID,
+    data: RoomDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_teacher),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+
+    if room.name != data.confirm_name.strip():
+        raise HTTPException(status_code=400, detail="房间名称确认不匹配")
+
+    await room_service.delete_room(db, room_id)
+
+    try:
+        redis_client = get_redis_client()
+        room_id_str = str(room_id)
+        await redis_client.srem("active_rooms", room_id_str)
+        await redis_client.delete(
+            f"agent_queue:{room_id_str}",
+            f"room:{room_id_str}:last_msg_time",
+            f"room:{room_id_str}:start_time",
+            f"room:{room_id_str}:agent_lock",
+            f"room:{room_id_str}:recent_senders",
+            f"trigger_lock:{room_id_str}:silence",
+            f"trigger_lock:{room_id_str}:monopoly",
+        )
+    except RuntimeError:
+        pass
+
+    return {"detail": "房间已删除"}
 
 
 @router.get("/{room_id}/messages", response_model=MessageHistoryResponse)

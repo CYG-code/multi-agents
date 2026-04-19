@@ -1,9 +1,10 @@
 from uuid import UUID
 from typing import Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.message import Message
 from app.models.room import Room, RoomStatus
 from app.models.room_member import RoomMember
 from app.schemas.room import RoomCreate
@@ -52,3 +53,17 @@ async def update_room_status(db: AsyncSession, room: Room, status: RoomStatus) -
     await db.commit()
     await db.refresh(room)
     return room
+
+
+async def bind_room_task(db: AsyncSession, room: Room, task_id: UUID) -> Room:
+    room.task_id = task_id
+    await db.commit()
+    await db.refresh(room)
+    return room
+
+
+async def delete_room(db: AsyncSession, room_id: UUID) -> None:
+    await db.execute(delete(Message).where(Message.room_id == room_id))
+    await db.execute(delete(RoomMember).where(RoomMember.room_id == room_id))
+    await db.execute(delete(Room).where(Room.id == room_id))
+    await db.commit()

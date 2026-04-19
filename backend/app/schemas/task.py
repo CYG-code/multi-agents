@@ -10,6 +10,13 @@ class TaskCreate(BaseModel):
     discussion_template: Optional[str] = None
 
 
+class TaskUpdate(BaseModel):
+    title: Optional[str] = None
+    requirements: Optional[str] = None
+    scripts: Optional[Any] = None
+    discussion_template: Optional[str] = None
+
+
 class TaskResponse(BaseModel):
     id: UUID
     title: str
