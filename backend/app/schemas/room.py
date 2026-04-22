@@ -21,6 +21,12 @@ class RoomTaskBindRequest(BaseModel):
     task_id: UUID
 
 
+class TaskScriptConfirmRequest(BaseModel):
+    current_status: Optional[str] = None
+    next_goal: Optional[str] = None
+    student_feedback: Optional[str] = None
+
+
 class RoomResponse(BaseModel):
     id: UUID
     name: str

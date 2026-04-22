@@ -16,9 +16,9 @@
       <ChatPanel class="flex-1" />
     </div>
 
-    <div class="w-[30%] flex flex-col gap-2 p-2">
+    <div class="w-[30%] min-h-0 flex flex-col gap-2 p-2">
       <TaskRequirements
-        class="flex-1"
+        class="flex-1 min-h-0"
         :task="roomStore.currentTask"
         :loading="roomStore.loadingContext"
         :error="roomStore.contextError"
@@ -29,15 +29,15 @@
         @save="saveTaskPatch"
       />
       <TaskScript
-        class="flex-1"
-        :task="roomStore.currentTask"
-        :loading="roomStore.loadingContext"
-        :error="roomStore.contextError"
-        :editable="authStore.isTeacher"
-        :saving="roomStore.savingTask"
-        :save-error="roomStore.taskSaveError"
-        :save-success="taskSaveSuccess"
-        @save="saveTaskPatch"
+        class="flex-1 min-h-0"
+        :state="roomStore.taskScriptState"
+        :loading="roomStore.loadingTaskScript"
+        :error="roomStore.taskScriptError"
+        :can-confirm="authStore.user?.role === 'student'"
+        :requesting-proposal="roomStore.requestingTaskScriptProposal"
+        :confirming-proposal="roomStore.confirmingTaskScriptProposal"
+        @request-proposal="requestFacilitatorProposal"
+        @confirm-proposal="confirmTaskScriptProposal"
       />
     </div>
   </div>
@@ -74,6 +74,15 @@ function leaveRoom() {
 async function saveTaskPatch(patch) {
   if (!authStore.isTeacher) return
   await roomStore.updateCurrentTask(patch)
+}
+
+async function requestFacilitatorProposal() {
+  await roomStore.requestFacilitatorTaskScriptProposal()
+}
+
+async function confirmTaskScriptProposal(payload) {
+  if (authStore.user?.role !== 'student') return
+  await roomStore.confirmTaskScriptProposal(payload || {})
 }
 
 onMounted(loadRoomContext)

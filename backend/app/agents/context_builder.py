@@ -15,6 +15,17 @@ from app.models.user import User
 def _format_task_workflow(scripts) -> str:
     if scripts is None:
         return "未提供任务流程"
+    if isinstance(scripts, dict) and (
+        "current_status" in scripts or "next_goal" in scripts or "pending_proposal" in scripts
+    ):
+        current_status = str(scripts.get("current_status") or "").strip() or "暂无"
+        next_goal = str(scripts.get("next_goal") or "").strip() or "暂无"
+        pending = scripts.get("pending_proposal")
+        pending_text = ""
+        if isinstance(pending, dict):
+            pending_goal = str(pending.get("next_goal") or "").strip() or "暂无"
+            pending_text = f"\n待确认提案下一步：{pending_goal}"
+        return f"当前状态：{current_status}\n下一步目标：{next_goal}{pending_text}"
     if isinstance(scripts, str):
         text = scripts.strip()
         return text or "未提供任务流程"

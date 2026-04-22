@@ -10,13 +10,31 @@ from app.db.session import get_db
 from app.dependencies import get_current_user, require_teacher
 from app.exceptions import RoomMemberForbiddenError, RoomNotFoundError
 from app.models.room_member import RoomMember
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.message import MessageHistoryResponse
-from app.schemas.room import RoomCreate, RoomDeleteRequest, RoomResponse, RoomTaskBindRequest, RoomUpdate
-from app.services import room_service, task_service
+from app.schemas.room import (
+    RoomCreate,
+    RoomDeleteRequest,
+    RoomResponse,
+    RoomTaskBindRequest,
+    RoomUpdate,
+    TaskScriptConfirmRequest,
+)
+from app.services import room_service, task_script_service, task_service
 from app.services.message_service import MessageService
 
 router = APIRouter()
+
+
+async def _ensure_room_member(db: AsyncSession, room_id: UUID, user_id: UUID) -> None:
+    membership = await db.execute(
+        select(RoomMember.id).where(
+            RoomMember.room_id == room_id,
+            RoomMember.user_id == user_id,
+        )
+    )
+    if membership.scalar_one_or_none() is None:
+        raise RoomMemberForbiddenError()
 
 
 @router.get("", response_model=list[RoomResponse])
@@ -159,13 +177,52 @@ async def get_messages(
     if not room:
         raise RoomNotFoundError()
 
-    membership = await db.execute(
-        select(RoomMember.id).where(
-            RoomMember.room_id == room_id,
-            RoomMember.user_id == current_user.id,
-        )
-    )
-    if membership.scalar_one_or_none() is None:
-        raise RoomMemberForbiddenError()
+    await _ensure_room_member(db, room_id, current_user.id)
 
     return await MessageService.get_history_messages(db, str(room_id), before_seq, limit)
+
+
+@router.get("/{room_id}/task-script", status_code=200)
+async def get_task_script_state(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+
+    task = await task_service.get_task(db, room.task_id) if room.task_id else None
+    return task_script_service.get_task_script_state(task)
+
+
+@router.post("/{room_id}/task-script/proposals/facilitator", status_code=200)
+async def propose_task_script_by_facilitator(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+    return await task_script_service.propose_facilitator_update(db, room, current_user)
+
+
+@router.post("/{room_id}/task-script/confirm", status_code=200)
+async def confirm_task_script_proposal(
+    room_id: UUID,
+    data: TaskScriptConfirmRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+    if current_user.role != UserRole.student:
+        raise HTTPException(status_code=403, detail="仅学生可确认流程提案")
+
+    overrides = (data.model_dump(exclude_none=True) if data else {})
+    return await task_script_service.confirm_pending_proposal(db, room, current_user, overrides=overrides)
