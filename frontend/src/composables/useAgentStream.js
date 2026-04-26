@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+﻿import { ref } from 'vue'
 import { useAgentStore } from '../stores/agent.js'
 import { useChatStore } from '../stores/chat.js'
 
@@ -11,13 +11,14 @@ export function useAgentStream() {
     agentStore.setTyping(agent_role, is_typing)
   }
 
-  function handleStream({ agent_role, message_id, token }) {
+  function handleStream({ agent_role, message_id, token, source_message_id }) {
     if (!streamBuffers.value.has(message_id)) {
       streamBuffers.value.set(message_id, '')
       chatStore.addMessage({
         id: message_id,
         sender_type: 'agent',
         agent_role,
+        source_message_id,
         content: '',
         status: 'streaming',
         created_at: new Date().toISOString(),
@@ -29,7 +30,7 @@ export function useAgentStream() {
     chatStore.updateMessageContent(message_id, current)
   }
 
-  function handleStreamEnd({ message_id, status, content, created_at, agent_role, error }) {
+  function handleStreamEnd({ message_id, status, content, created_at, agent_role, error, source_message_id }) {
     streamBuffers.value.delete(message_id)
     const normalizedContent = (content || '').trim()
 
@@ -38,9 +39,10 @@ export function useAgentStream() {
         id: message_id,
         sender_type: 'agent',
         agent_role,
+        source_message_id,
         content:
           status === 'failed'
-            ? `智能体本次调用失败${error ? `：${error}` : ''}`
+            ? `Agent call failed${error ? `: ${error}` : ''}`
             : normalizedContent,
         status: status || 'failed',
         created_at: created_at || new Date().toISOString(),
@@ -52,9 +54,10 @@ export function useAgentStream() {
       status,
       content:
         status === 'failed' && !normalizedContent
-          ? `智能体本次调用失败${error ? `：${error}` : ''}`
+          ? `Agent call failed${error ? `: ${error}` : ''}`
           : content,
       created_at,
+      source_message_id: source_message_id || undefined,
     })
   }
 

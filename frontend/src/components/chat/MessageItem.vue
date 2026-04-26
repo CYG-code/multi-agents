@@ -15,7 +15,14 @@
         <span :class="['text-xs font-medium px-2 py-0.5 rounded-full', agentStyle.bg, agentStyle.text]">
           {{ agentStyle.label }}
         </span>
+        <span v-if="replyTargetText" class="text-[11px] text-gray-500">
+          回复 {{ replyTargetText }}
+        </span>
         <span class="text-xs text-gray-400">{{ formatTime(message.created_at) }}</span>
+      </div>
+
+      <div v-if="sourcePreviewText" class="mb-1 text-[11px] text-gray-500">
+        针对问题：{{ sourcePreviewText }}
       </div>
 
       <div class="bg-gray-50 border border-gray-200 rounded-2xl rounded-tl-sm px-3 py-2 text-sm text-gray-800">
@@ -57,6 +64,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useAuthStore } from '../../stores/auth.js'
+import { useChatStore } from '../../stores/chat.js'
 
 const props = defineProps({
   message: {
@@ -66,6 +74,7 @@ const props = defineProps({
 })
 
 const authStore = useAuthStore()
+const chatStore = useChatStore()
 
 const AGENT_COLORS = {
   facilitator: { bg: 'bg-indigo-100', text: 'text-indigo-700', label: 'Facilitator' },
@@ -93,6 +102,23 @@ const avatarText = computed(() => {
 })
 
 const renderedContent = computed(() => renderBasicMarkdown(props.message.content || ''))
+const sourceMessage = computed(() => {
+  const sourceId = props.message?.source_message_id
+  if (!sourceId) return null
+  return chatStore.messages.find((m) => m.id === sourceId) || null
+})
+
+const replyTargetText = computed(() => {
+  if (!isAgent.value || !sourceMessage.value) return ''
+  return sourceMessage.value.display_name || '某位同学'
+})
+
+const sourcePreviewText = computed(() => {
+  if (!isAgent.value || !sourceMessage.value?.content) return ''
+  const raw = sourceMessage.value.content.replace(/\s+/g, ' ').trim()
+  if (!raw) return ''
+  return raw.length > 36 ? `${raw.slice(0, 36)}...` : raw
+})
 
 function escapeHtml(text) {
   return text
