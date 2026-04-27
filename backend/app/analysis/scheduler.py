@@ -9,7 +9,7 @@ from app.agents.llm_client import refresh_model_routing
 from app.agents.queue import enqueue_task
 from app.agents.settings import get_agent_settings
 from app.analysis.timer_phase import get_elapsed_seconds_from_timer_start
-from app.db.redis_client import get_redis_client
+from app.db.redis_client import cleanup_stale_online_presence, get_redis_client
 
 scheduler = AsyncIOScheduler()
 
@@ -29,8 +29,11 @@ async def check_silence() -> None:
     lock_ttl = cfg.timing.silence_threshold_seconds + 60
 
     for room_id in active_rooms:
-        last_msg_time = await redis_client.get(f"room:{room_id}:last_msg_time")
-        if not last_msg_time:
+        last_activity_time = await redis_client.get(f"room:{room_id}:last_activity_time")
+        if not last_activity_time:
+            # Backward compatibility: older rooms may only have chat timestamp.
+            last_activity_time = await redis_client.get(f"room:{room_id}:last_msg_time")
+        if not last_activity_time:
             continue
 
         elapsed_seconds = await get_elapsed_seconds_from_timer_start(room_id)
@@ -40,7 +43,7 @@ async def check_silence() -> None:
         if elapsed_seconds < warmup_seconds:
             continue
 
-        silence = now - float(last_msg_time)
+        silence = now - float(last_activity_time)
         if silence < cfg.timing.silence_threshold_seconds:
             continue
 
@@ -81,6 +84,10 @@ async def check_committee_timer() -> None:
         await basic_committee.analyze_and_dispatch(room_id)
 
 
+async def check_online_presence_cleanup() -> None:
+    await cleanup_stale_online_presence(stale_seconds=120)
+
+
 def start_scheduler() -> None:
     if scheduler.running:
         return
@@ -99,6 +106,13 @@ def start_scheduler() -> None:
         "interval",
         seconds=300,
         id="refresh_model_routing",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_online_presence_cleanup,
+        "interval",
+        seconds=60,
+        id="cleanup_online_presence",
         replace_existing=True,
     )
     scheduler.start()

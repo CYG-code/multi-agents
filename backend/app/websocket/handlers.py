@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import Depends, WebSocket, WebSocketDisconnect
@@ -13,13 +14,14 @@ from app.agents.queue import enqueue_task
 from app.agents.role_agents import ROLE_AGENTS
 from app.agents.settings import get_agent_settings
 from app.analysis.triggers import trigger_detector
-from app.db.redis_client import get_redis_client
+from app.db.redis_client import get_redis_client, touch_online_presence
 from app.db.session import get_db
 from app.models.room_member import RoomMember
 from app.models.user import User
 from app.schemas.message import ChatMessageFrame
 from app.services.auth_service import decode_access_token
 from app.services.message_service import MessageService
+from app.services import writing_doc_service
 from app.websocket.manager import ConnectionManager
 
 manager = ConnectionManager()
@@ -132,6 +134,13 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
         )
 
 
+async def _touch_online_presence_best_effort(room_id: str, user_id: str) -> None:
+    try:
+        await touch_online_presence(room_id, user_id)
+    except RuntimeError:
+        pass
+
+
 async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSession) -> None:
     try:
         frame = ChatMessageFrame.model_validate(data)
@@ -153,8 +162,10 @@ async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSes
     now_ts = msg.created_at.timestamp() if msg.created_at else None
     if redis_client is not None and now_ts is not None:
         await redis_client.set(f"room:{room_id}:last_msg_time", now_ts)
+        await redis_client.set(f"room:{room_id}:last_activity_time", now_ts)
         await redis_client.setnx(f"room:{room_id}:start_time", now_ts)
         await redis_client.sadd("active_rooms", room_id)
+    await _touch_online_presence_best_effort(room_id, str(user.id))
 
     await manager.broadcast_to_room(
         room_id,
@@ -172,6 +183,68 @@ async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSes
 
     await trigger_detector.check_monopoly(room_id, str(user.id))
     await _trigger_mentions(room_id, str(msg.id), user, mentions)
+
+
+async def handle_writing_update(websocket: WebSocket, data: dict, room_id: str, user: User) -> None:
+    content = str(data.get("content") or "")
+    base_version_raw = data.get("base_version")
+    try:
+        base_version = int(base_version_raw) if base_version_raw is not None else None
+    except (TypeError, ValueError):
+        base_version = None
+    # Soft guard to avoid extremely large payloads over websocket.
+    if len(content) > 200_000:
+        return
+
+    state, applied = await writing_doc_service.apply_writing_doc_update_with_base_version(
+        room_id,
+        content,
+        str(user.id),
+        updated_by_display_name=user.display_name,
+        base_version=base_version,
+    )
+    await _touch_online_presence_best_effort(room_id, str(user.id))
+    if not applied:
+        await websocket.send_json(
+            {
+                "type": "writing:resync",
+                "room_id": room_id,
+                "content": state["content"],
+                "version": state["version"],
+                "updated_at": state["updated_at"],
+                "updated_by": state["updated_by"],
+                "updated_by_display_name": state.get("updated_by_display_name"),
+                "reason": "stale_base_version",
+            }
+        )
+        return
+
+    await manager.broadcast_to_room(
+        room_id,
+        {
+            "type": "writing:updated",
+            "room_id": room_id,
+            "content": state["content"],
+            "version": state["version"],
+            "updated_at": state["updated_at"],
+            "updated_by": state["updated_by"],
+            "updated_by_display_name": state.get("updated_by_display_name"),
+        },
+    )
+
+
+async def handle_writing_awareness(data: dict, room_id: str, user: User) -> None:
+    await _touch_online_presence_best_effort(room_id, str(user.id))
+    payload = {
+        "type": "writing:awareness",
+        "room_id": room_id,
+        "user_id": str(user.id),
+        "display_name": user.display_name,
+        "is_editing": bool(data.get("is_editing")),
+        "cursor": data.get("cursor"),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    await manager.broadcast_to_room(room_id, payload)
 
 
 async def websocket_endpoint(
@@ -217,8 +290,17 @@ async def websocket_endpoint(
     try:
         while True:
             data = await websocket.receive_json()
+            if data.get("type") == "presence:ping":
+                await _touch_online_presence_best_effort(room_id, str(user.id))
+                continue
             if data.get("type") == "chat:message":
                 await handle_chat_message(data, room_id, user, db)
+                continue
+            if data.get("type") == "writing:update":
+                await handle_writing_update(websocket, data, room_id, user)
+                continue
+            if data.get("type") == "writing:awareness":
+                await handle_writing_awareness(data, room_id, user)
     except WebSocketDisconnect:
         await manager.disconnect(websocket, room_id, str(user.id))
         online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
@@ -231,4 +313,3 @@ async def websocket_endpoint(
                 "online_count": online_count,
             },
         )
-

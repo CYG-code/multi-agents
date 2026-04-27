@@ -8,7 +8,7 @@ from app.agents.agent_worker import agent_worker
 from app.agents.llm_client import initialize_model_routing
 from app.analysis.scheduler import start_scheduler, stop_scheduler
 from app.config import settings
-from app.db.redis_client import close_redis, init_redis
+from app.db.redis_client import clear_online_presence_keys, close_redis, init_redis
 from app.routers import auth, rooms, tasks
 from app.websocket.handlers import websocket_endpoint
 
@@ -16,6 +16,7 @@ from app.websocket.handlers import websocket_endpoint
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_redis()
+    await clear_online_presence_keys()
     await initialize_model_routing()
     start_scheduler()
     worker_task = asyncio.create_task(agent_worker.run())

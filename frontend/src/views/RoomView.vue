@@ -87,9 +87,9 @@ const TEXT_TIMER_NOT_STARTED = '\u8ba1\u65f6\u672a\u5f00\u59cb'
 const TEXT_TIME_REMAINING = '\u5269\u4f59'
 const TEXT_OVERTIME = '\u5df2\u8d85\u65f6'
 const TEXT_START_TIMER = '\u5f00\u59cb\u8ba1\u65f6'
-const TEXT_RESET_TIMER = '\u91cd\u7f6e\u4e3a90\u5206\u949f'
+const TEXT_RESET_TIMER = '\u91cd\u7f6e\u8ba1\u65f6'
 const TEXT_CONFIRM_START = '\u786e\u8ba4\u5f00\u59cb90\u5206\u949f\u8ba1\u65f6\uff1f'
-const TEXT_CONFIRM_RESET = '\u786e\u8ba4\u91cd\u7f6e\u8ba1\u65f6\u4e3a90\u5206\u949f\uff1f'
+const TEXT_CONFIRM_RESET = '\u786e\u8ba4\u91cd\u7f6e\u8ba1\u65f6\uff1f\u91cd\u7f6e\u540e\u5c06\u56de\u5230\u201c\u8ba1\u65f6\u672a\u5f00\u59cb\u201d\u3002'
 
 const route = useRoute()
 const router = useRouter()
@@ -172,7 +172,11 @@ async function handleTimerAction() {
   const confirmText = hasStarted ? TEXT_CONFIRM_RESET : TEXT_CONFIRM_START
   if (!window.confirm(confirmText)) return
 
-  await roomStore.startOrResetRoomTimer(String(route.params.id || ''))
+  if (hasStarted) {
+    await roomStore.resetRoomTimer(String(route.params.id || ''))
+  } else {
+    await roomStore.startRoomTimer(String(route.params.id || ''))
+  }
 }
 
 async function saveTaskPatch(patch) {

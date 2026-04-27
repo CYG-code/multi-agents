@@ -1,11 +1,12 @@
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.db.session import get_db
 from app.dependencies import get_current_user
-from app.models.room import Room
+from app.models.room import Room, RoomStatus
 from app.models.user import User, UserRole
 from app.routers import rooms
 from tests.conftest import FakeDBSession, FakeExecuteResult
@@ -73,6 +74,51 @@ def test_get_task_script_endpoint_returns_state(fake_db, monkeypatch):
     assert resp.json()["next_goal"] == "G"
 
 
+def test_list_rooms_hides_timer_ended_rooms_for_student(fake_db, monkeypatch):
+    room_running = Room(id=uuid.uuid4(), name="R1", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+    room_ended = Room(id=uuid.uuid4(), name="R2", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+    room_ended.timer_stopped_at = datetime.now(timezone.utc)
+    client = _build_client(fake_db, _student_user())
+
+    async def _fake_get_rooms(_db, _status):
+        return [room_running, room_ended]
+
+    async def _fake_member_count(_db, _room_id):
+        return 2
+
+    monkeypatch.setattr(rooms.room_service, "get_rooms", _fake_get_rooms)
+    monkeypatch.setattr(rooms.room_service, "get_member_count", _fake_member_count)
+
+    resp = client.get("/api/rooms")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["id"] == str(room_running.id)
+
+
+def test_list_rooms_keeps_timer_ended_rooms_for_teacher(fake_db, monkeypatch):
+    room_running = Room(id=uuid.uuid4(), name="R1", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+    room_ended = Room(id=uuid.uuid4(), name="R2", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+    room_ended.timer_stopped_at = datetime.now(timezone.utc)
+    client = _build_client(fake_db, _teacher_user())
+
+    async def _fake_get_rooms(_db, _status):
+        return [room_running, room_ended]
+
+    async def _fake_member_count(_db, _room_id):
+        return 3
+
+    monkeypatch.setattr(rooms.room_service, "get_rooms", _fake_get_rooms)
+    monkeypatch.setattr(rooms.room_service, "get_member_count", _fake_member_count)
+
+    resp = client.get("/api/rooms")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+
+
 def test_confirm_task_script_forbidden_for_teacher(fake_db, monkeypatch):
     room_id = uuid.uuid4()
     room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
@@ -104,10 +150,12 @@ def test_confirm_task_script_calls_service_for_student(fake_db, monkeypatch):
     async def _fake_get_room(_db, _room_id):
         return room
 
-    async def _fake_confirm(_db, _room, _user, overrides=None):
+    async def _fake_confirm(_db, _room, _user, overrides=None, proposal_id=None, lease_id=None):
         called["room"] = _room
         called["user"] = _user
         called["overrides"] = overrides
+        called["proposal_id"] = proposal_id
+        called["lease_id"] = lease_id
         return {"task_id": "t1", "current_status": "S2", "next_goal": "G2", "history": [], "pending_proposal": None}
 
     monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
@@ -124,3 +172,200 @@ def test_confirm_task_script_calls_service_for_student(fake_db, monkeypatch):
     assert called["user"].id == student.id
     assert called["overrides"]["current_status"] == "S-Edited"
     assert called["overrides"]["student_feedback"] == "先小范围试跑"
+
+def test_report_room_activity_updates_last_activity_time(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    client = _build_client(fake_db, _student_user())
+
+    class _FakeRedis:
+        def __init__(self):
+            self.set_calls = []
+            self.sadd_calls = []
+
+        async def set(self, key, value):
+            self.set_calls.append((key, value))
+
+        async def sadd(self, key, value):
+            self.sadd_calls.append((key, value))
+
+    fake_redis = _FakeRedis()
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+    monkeypatch.setattr(rooms, "get_redis_client", lambda: fake_redis)
+
+    resp = client.post(
+        f"/api/rooms/{room_id}/activity",
+        json={"activity_type": "writing"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert resp.json()["activity_type"] == "writing"
+    assert len(fake_redis.set_calls) == 1
+    assert fake_redis.set_calls[0][0] == f"room:{room_id}:last_activity_time"
+    assert len(fake_redis.sadd_calls) == 1
+    assert fake_redis.sadd_calls[0] == ("active_rooms", str(room_id))
+
+
+def test_get_writing_submit_state_returns_service_result(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    client = _build_client(fake_db, _student_user())
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    async def _fake_get_state(_room_id_str):
+        return {"required_confirmations": 3, "confirmations": [], "final_submitted_at": None}
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+    monkeypatch.setattr(rooms.writing_submit_service, "get_writing_submit_state", _fake_get_state)
+
+    resp = client.get(f"/api/rooms/{room_id}/writing-submit")
+
+    assert resp.status_code == 200
+    assert resp.json()["required_confirmations"] == 3
+
+
+def test_confirm_writing_submit_forbidden_for_teacher(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    client = _build_client(fake_db, _teacher_user())
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+
+    resp = client.post(f"/api/rooms/{room_id}/writing-submit/confirm")
+
+    assert resp.status_code == 403
+
+
+def test_get_writing_doc_state_returns_service_result(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    client = _build_client(fake_db, _student_user())
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    async def _fake_get_doc(_room_id_str):
+        return {"content": "<p>x</p>", "version": 2, "updated_at": None, "updated_by": "u1"}
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+    monkeypatch.setattr(rooms.writing_doc_service, "get_writing_doc_state", _fake_get_doc)
+
+    resp = client.get(f"/api/rooms/{room_id}/writing-doc")
+
+    assert resp.status_code == 200
+    assert resp.json()["content"] == "<p>x</p>"
+    assert resp.json()["version"] == 2
+
+
+def test_get_writing_doc_history_returns_items(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    client = _build_client(fake_db, _student_user())
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    async def _fake_history(_room_id_str, limit=20):
+        _ = limit
+        return [{"content": "A", "version": 1, "updated_at": None, "updated_by": "u1", "updated_by_display_name": "Alice"}]
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+    monkeypatch.setattr(rooms.writing_doc_service, "get_writing_doc_history", _fake_history)
+
+    resp = client.get(f"/api/rooms/{room_id}/writing-doc/history")
+
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["version"] == 1
+
+
+def test_restore_writing_doc_forbidden_for_student(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    client = _build_client(fake_db, _student_user())
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+
+    resp = client.post(f"/api/rooms/{room_id}/writing-doc/restore", json={"version": 1})
+
+    assert resp.status_code == 403
+
+
+def test_save_writing_doc_version_forbidden_for_teacher(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    client = _build_client(fake_db, _teacher_user())
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+
+    resp = client.post(f"/api/rooms/{room_id}/writing-doc/save-version")
+
+    assert resp.status_code == 403
+
+
+def test_save_writing_doc_version_returns_latest_history_for_student(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    student = _student_user()
+    client = _build_client(fake_db, student)
+    called = {}
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    async def _fake_save(_room_id_str, saved_by, saved_by_display_name):
+        called["room_id"] = _room_id_str
+        called["saved_by"] = saved_by
+        called["saved_by_display_name"] = saved_by_display_name
+        return {"version": 2}
+
+    async def _fake_history(_room_id_str, limit=3):
+        called["limit"] = limit
+        return [
+            {
+                "content": "<p>x</p>",
+                "version": 2,
+                "updated_at": None,
+                "updated_by": str(student.id),
+                "updated_by_display_name": student.display_name,
+                "saved_at": None,
+                "saved_by": str(student.id),
+                "saved_by_display_name": student.display_name,
+            }
+        ]
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+    monkeypatch.setattr(rooms.writing_doc_service, "save_writing_doc_version", _fake_save)
+    monkeypatch.setattr(rooms.writing_doc_service, "get_writing_doc_history", _fake_history)
+
+    resp = client.post(f"/api/rooms/{room_id}/writing-doc/save-version")
+
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["version"] == 2
+    assert called["room_id"] == str(room_id)
+    assert called["saved_by"] == str(student.id)
+    assert called["saved_by_display_name"] == student.display_name
+    assert called["limit"] == 3

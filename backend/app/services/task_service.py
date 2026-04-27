@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.task import Task
@@ -33,3 +33,8 @@ async def update_task(db: AsyncSession, task: Task, data: TaskUpdate) -> Task:
     await db.commit()
     await db.refresh(task)
     return task
+
+
+async def delete_task(db: AsyncSession, task_id: UUID) -> None:
+    await db.execute(delete(Task).where(Task.id == task_id))
+    await db.commit()

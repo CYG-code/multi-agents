@@ -292,6 +292,10 @@ onMounted(async () => {
     roomStore.applyRoomTimerUpdate(data)
   })
 
+  on('room:writing_submit_updated', (data) => {
+    roomStore.applyWritingSubmitUpdate(data)
+  })
+
   // Re-sync history after reconnect to avoid message gaps.
   on('__reconnect__', async () => {
     unreadCount.value = 0

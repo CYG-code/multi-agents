@@ -1,8 +1,8 @@
 timing:
   silence_trigger_enabled: false
-  silence_threshold_seconds: 180
+  silence_threshold_seconds: 120
   analysis_interval_minutes: 5
-  warmup_minutes: 2
+  warmup_minutes: 3
   agent_cooldown_seconds: 60
   global_intervention_limit_per_hour: 12
 

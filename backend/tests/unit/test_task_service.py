@@ -42,3 +42,8 @@ async def test_get_task(fake_db):
 
     assert result is task
 
+
+@pytest.mark.asyncio
+async def test_delete_task_commits(fake_db):
+    await task_service.delete_task(fake_db, uuid.uuid4())
+    assert fake_db.commits == 1

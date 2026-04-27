@@ -45,7 +45,6 @@
       <div v-if="pendingProposal" class="rounded-md border border-amber-200 bg-amber-50 p-2">
         <p class="mb-1 text-xs font-semibold text-amber-700">{{ TXT.pendingTitle }}</p>
         <p class="text-[11px] text-amber-700">{{ TXT.pendingHint }}</p>
-        <p class="mt-1 text-[11px] text-amber-700">{{ TXT.progress }}: {{ confirmationProgressText }}</p>
 
         <div class="mt-2 rounded border border-amber-200 bg-white p-2 text-[11px] text-amber-800">
           <div v-if="lockState?.locked">
@@ -107,7 +106,7 @@
         />
 
         <div class="mt-2 flex items-center justify-between gap-2">
-          <span class="text-[11px] text-amber-600">{{ TXT.multiSignHint }}</span>
+          <span class="text-[11px] text-amber-600">{{ TXT.singleConfirmHint }}</span>
           <button
             type="button"
             class="rounded border border-green-200 bg-white px-2 py-1 text-xs text-green-700 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
@@ -119,7 +118,6 @@
         </div>
 
         <p v-if="!canConfirm" class="mt-1 text-[11px] text-amber-600">{{ TXT.onlyStudent }}</p>
-        <p v-else-if="hasConfirmedCurrentProposal" class="mt-1 text-[11px] text-amber-600">{{ TXT.alreadyConfirmed }}</p>
       </div>
     </div>
   </div>
@@ -137,8 +135,7 @@ const TXT = {
   nextGoal: '\u4e0b\u4e00\u6b65\u76ee\u6807',
   empty: '\u6682\u65e0',
   pendingTitle: '\u5f85\u786e\u8ba4\u53d8\u66f4\uff08\u4e3b\u6301\u667a\u80fd\u4f53\uff09',
-  pendingHint: '\u652f\u6301\u591a\u4eba\u786e\u8ba4\uff0c\u7d2f\u8ba1 3 \u4f4d\u5b66\u751f\u786e\u8ba4\u540e\u624d\u6b63\u5f0f\u751f\u6548\u3002',
-  progress: '\u591a\u7b7e\u786e\u8ba4\u8fdb\u5ea6',
+  pendingHint: '\u5b66\u751f\u5355\u4eba\u7f16\u8f91\u5e76\u786e\u8ba4\u540e\u751f\u6548\uff0c\u540c\u4e00\u65f6\u523b\u4ec5\u5141\u8bb8\u4e00\u4f4d\u5b66\u751f\u7f16\u8f91\u3002',
   lockMine: '\u4f60\u6b63\u5728\u7f16\u8f91\u8be5\u63d0\u6848',
   lockBy: '\u5f53\u524d\u7531',
   lockEditing: '\u7f16\u8f91\u4e2d',
@@ -155,12 +152,10 @@ const TXT = {
   reason: '\u8c03\u6574\u7406\u7531',
   feedback: '\u5b66\u751f\u610f\u89c1\uff08\u53ef\u9009\uff09',
   feedbackPlaceholder: '\u4f8b\u5982\uff1a\u5efa\u8bae\u628a\u76ee\u6807\u62c6\u6210\u4e24\u6b65\uff0c\u5148\u505a\u6570\u636e\u6536\u96c6\u3002',
-  multiSignHint: '\u63d0\u4ea4\u9700\u8981 3 \u4f4d\u5b66\u751f\u786e\u8ba4\u624d\u751f\u6548\u3002',
+  singleConfirmHint: '\u5f53\u524d\u7f16\u8f91\u8005\u786e\u8ba4\u540e\u7acb\u5373\u751f\u6548\u3002',
   onlyStudent: '\u4ec5\u5b66\u751f\u53ef\u786e\u8ba4\u6b64\u63d0\u6848',
-  alreadyConfirmed: '\u4f60\u5df2\u5b8c\u6210\u672c\u8f6e\u786e\u8ba4\uff0c\u8bf7\u7b49\u5f85\u5176\u4ed6\u540c\u5b66\u3002',
   submit: '\u786e\u8ba4\u5e76\u63d0\u4ea4',
   submitting: '\u63d0\u4ea4\u4e2d...',
-  confirmed: '\u4f60\u5df2\u786e\u8ba4',
 }
 
 const props = defineProps({
@@ -185,16 +180,6 @@ const currentStatus = computed(() => props.state?.current_status || '')
 const nextGoal = computed(() => props.state?.next_goal || '')
 const pendingProposal = computed(() => props.state?.pending_proposal || null)
 const currentProposalId = computed(() => pendingProposal.value?.id || '')
-const proposalConfirmations = computed(() =>
-  Array.isArray(pendingProposal.value?.confirmations) ? pendingProposal.value.confirmations : []
-)
-const requiredConfirmations = computed(() => Number(pendingProposal.value?.required_confirmations || 3))
-const confirmationProgressText = computed(() => `${proposalConfirmations.value.length}/${requiredConfirmations.value}`)
-const hasConfirmedCurrentProposal = computed(() => {
-  const uid = String(props.currentUserId || '')
-  if (!uid) return false
-  return proposalConfirmations.value.some((item) => String(item?.user_id || '') === uid)
-})
 
 const editableCurrentStatus = ref('')
 const editableNextGoal = ref('')
@@ -206,14 +191,14 @@ const canEdit = computed(() => {
 })
 
 const canConfirmAction = computed(() => {
-  if (!props.canConfirm || props.confirmingProposal || hasConfirmedCurrentProposal.value) return false
-  if (props.hasEditLock && (!editableCurrentStatus.value.trim() || !editableNextGoal.value.trim())) return false
+  if (!props.canConfirm || props.confirmingProposal) return false
+  if (!props.hasEditLock) return false
+  if (!editableCurrentStatus.value.trim() || !editableNextGoal.value.trim()) return false
   return true
 })
 
 const confirmButtonText = computed(() => {
   if (props.confirmingProposal) return TXT.submitting
-  if (hasConfirmedCurrentProposal.value) return TXT.confirmed
   return TXT.submit
 })
 

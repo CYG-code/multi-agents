@@ -3,7 +3,7 @@ import json
 
 from fastapi import WebSocket
 
-from app.db.redis_client import get_redis_client
+from app.db.redis_client import get_redis_client, touch_online_presence
 
 
 class ConnectionManager:
@@ -25,7 +25,14 @@ class ConnectionManager:
         )
 
         redis_client = get_redis_client()
-        await redis_client.sadd(f"room:{room_id}:online_users", str(user.id))
+        user_id = str(user.id)
+        user_conn_key = f"room:{room_id}:online_user_conn_counts"
+        online_users_key = f"room:{room_id}:online_users"
+
+        user_conn_count = int(await redis_client.hincrby(user_conn_key, user_id, 1))
+        if user_conn_count == 1:
+            await redis_client.sadd(online_users_key, user_id)
+        await touch_online_presence(room_id, user_id)
 
     async def disconnect(self, websocket: WebSocket, room_id: str, user_id: str) -> None:
         if room_id in self._rooms:
@@ -37,7 +44,14 @@ class ConnectionManager:
                 del self._rooms[room_id]
 
         redis_client = get_redis_client()
-        await redis_client.srem(f"room:{room_id}:online_users", user_id)
+        user_conn_key = f"room:{room_id}:online_user_conn_counts"
+        online_users_key = f"room:{room_id}:online_users"
+
+        user_conn_count = int(await redis_client.hincrby(user_conn_key, user_id, -1))
+        if user_conn_count <= 0:
+            await redis_client.hdel(user_conn_key, user_id)
+            await redis_client.srem(online_users_key, user_id)
+            await redis_client.hdel(f"room:{room_id}:online_user_last_seen", user_id)
 
     async def broadcast_to_room(self, room_id: str, data: dict) -> None:
         redis_client = get_redis_client()

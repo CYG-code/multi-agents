@@ -15,7 +15,7 @@ from app.models.user import User
 from app.services import room_service, task_service
 
 LOCK_TTL_SECONDS = 120
-REQUIRED_STUDENT_CONFIRMATIONS = 3
+REQUIRED_STUDENT_CONFIRMATIONS = 1
 
 
 def _to_text(value) -> str:
@@ -108,20 +108,14 @@ async def _broadcast_task_script_updated(room_id: str, reason: str) -> None:
         return
 
 
-async def _broadcast_room_timer_updated(room: Room) -> None:
+async def _touch_room_activity(room_id: str) -> None:
     try:
         redis_client = get_redis_client()
-        payload = {
-            "type": "room:timer_updated",
-            "room_id": str(room.id),
-            "timer_started_at": room.timer_started_at.isoformat() if room.timer_started_at else None,
-            "timer_deadline_at": room.timer_deadline_at.isoformat() if room.timer_deadline_at else None,
-            "timer_stopped_at": room.timer_stopped_at.isoformat() if room.timer_stopped_at else None,
-        }
-        await redis_client.publish(f"room:{room.id}", json.dumps(payload, ensure_ascii=False))
     except Exception:
-        # Timer state has been persisted; broadcast is best-effort.
         return
+    now_ts = datetime.now(timezone.utc).timestamp()
+    await redis_client.set(f"room:{room_id}:last_activity_time", now_ts)
+    await redis_client.sadd("active_rooms", room_id)
 
 
 async def _get_lock_raw(room_id: str) -> dict | None:
@@ -268,6 +262,7 @@ async def propose_facilitator_update(db, room: Room, current_user: User) -> dict
     }
     await db.commit()
     await db.refresh(task)
+    await _touch_room_activity(room_id)
     await _broadcast_task_script_updated(room_id, reason="proposal_created")
     return get_task_script_state(task)
 
@@ -297,6 +292,7 @@ async def acquire_task_script_lock(db, room: Room, current_user: User) -> dict:
             lease_id = str(existing.get("lease_id") or str(uuid.uuid4()))
             payload = _build_lock_payload(current_user, proposal_id=proposal_id, lease_id=lease_id)
             await redis_client.setex(key, LOCK_TTL_SECONDS, json.dumps(payload, ensure_ascii=False))
+            await _touch_room_activity(room_id)
             await _broadcast_task_script_updated(room_id, reason="lock_acquired")
             return {
                 "acquired": True,
@@ -320,6 +316,7 @@ async def acquire_task_script_lock(db, room: Room, current_user: User) -> dict:
             "lease_id": None,
             "lock": _format_lock_public(latest, str(current_user.id)),
         }
+    await _touch_room_activity(room_id)
     await _broadcast_task_script_updated(room_id, reason="lock_acquired")
     return {
         "acquired": True,
@@ -342,6 +339,7 @@ async def renew_task_script_lock(room_id: str, current_user: User, lease_id: str
     proposal_id = str(existing.get("proposal_id") or "")
     payload = _build_lock_payload(current_user, proposal_id=proposal_id, lease_id=lease_id)
     await redis_client.setex(key, LOCK_TTL_SECONDS, json.dumps(payload, ensure_ascii=False))
+    await _touch_room_activity(room_id)
     return {"renewed": True, "lease_id": lease_id, "lock": _format_lock_public(payload, str(current_user.id))}
 
 
@@ -357,6 +355,7 @@ async def release_task_script_lock(room_id: str, current_user: User, lease_id: s
         raise HTTPException(status_code=409, detail="Lease id mismatch")
 
     await redis_client.delete(key)
+    await _touch_room_activity(room_id)
     await _broadcast_task_script_updated(room_id, reason="lock_released")
     return {"released": True, "lock": _format_lock_public(None, str(current_user.id))}
 
@@ -387,32 +386,25 @@ async def confirm_pending_proposal(
         raise HTTPException(status_code=409, detail="Proposal has changed, please refresh")
     room_id = str(room.id)
     lock_data = await _get_lock_raw(room_id)
-    lock_owned_by_current_user = False
-    if lock_data:
-        if str(lock_data.get("proposal_id")) != pending_id:
-            raise HTTPException(status_code=409, detail="Proposal lock mismatch, please refresh")
-        lock_owned_by_current_user = str(lock_data.get("user_id")) == str(current_user.id)
-        if lock_owned_by_current_user and str(lock_data.get("lease_id")) != str(lease_id or ""):
-            raise HTTPException(status_code=409, detail="Lease id mismatch")
+    if not lock_data:
+        raise HTTPException(status_code=409, detail="Please acquire edit lock before confirming")
+    if str(lock_data.get("proposal_id")) != pending_id:
+        raise HTTPException(status_code=409, detail="Proposal lock mismatch, please refresh")
+    lock_owned_by_current_user = str(lock_data.get("user_id")) == str(current_user.id)
+    if not lock_owned_by_current_user:
+        raise HTTPException(status_code=409, detail="Only current editor can confirm this proposal")
+    if str(lock_data.get("lease_id")) != str(lease_id or ""):
+        raise HTTPException(status_code=409, detail="Lease id mismatch")
 
     overrides = overrides or {}
-    has_override_values = (
-        "current_status" in overrides
-        or "next_goal" in overrides
-        or "student_feedback" in overrides
-    )
-    if has_override_values and not lock_owned_by_current_user:
-        raise HTTPException(status_code=409, detail="Only the current editor can modify proposal content")
-
     final_current_status = _to_text(pending.get("current_status"))
     final_next_goal = _to_text(pending.get("next_goal"))
-    if lock_owned_by_current_user:
-        override_current_status = _to_text(overrides.get("current_status"))
-        override_next_goal = _to_text(overrides.get("next_goal"))
-        if override_current_status:
-            final_current_status = override_current_status
-        if override_next_goal:
-            final_next_goal = override_next_goal
+    override_current_status = _to_text(overrides.get("current_status"))
+    override_next_goal = _to_text(overrides.get("next_goal"))
+    if override_current_status:
+        final_current_status = override_current_status
+    if override_next_goal:
+        final_next_goal = override_next_goal
 
     student_feedback = _to_text(overrides.get("student_feedback"))
 
@@ -463,6 +455,7 @@ async def confirm_pending_proposal(
                 await release_task_script_lock(room_id, current_user, str(lease_id or ""))
             except HTTPException:
                 pass
+        await _touch_room_activity(room_id)
         await _broadcast_task_script_updated(room_id, reason="proposal_confirmation_progress")
         return get_task_script_state(task)
 
@@ -491,7 +484,6 @@ async def confirm_pending_proposal(
         "pending_proposal": None,
     }
 
-    room = await room_service.stop_room_timer(db, room)
     await db.commit()
     await db.refresh(task)
 
@@ -501,6 +493,6 @@ async def confirm_pending_proposal(
     except HTTPException:
         # Confirmation already succeeded; lock release conflict should not fail the main write.
         pass
-    await _broadcast_room_timer_updated(room)
+    await _touch_room_activity(room_id)
     await _broadcast_task_script_updated(room_id, reason="proposal_confirmed")
     return get_task_script_state(task)

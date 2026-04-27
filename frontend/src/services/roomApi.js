@@ -25,7 +25,31 @@ export const roomApi = {
   confirmTaskScriptProposal(roomId, payload = {}) {
     return api.post(`/rooms/${roomId}/task-script/confirm`, payload)
   },
-  startOrResetRoomTimer(roomId) {
+  startRoomTimer(roomId) {
     return api.post(`/rooms/${roomId}/timer/start`)
+  },
+  resetRoomTimer(roomId) {
+    return api.post(`/rooms/${roomId}/timer/reset`)
+  },
+  reportRoomActivity(roomId, activityType = 'writing') {
+    return api.post(`/rooms/${roomId}/activity`, { activity_type: activityType })
+  },
+  getWritingSubmitState(roomId) {
+    return api.get(`/rooms/${roomId}/writing-submit`)
+  },
+  confirmWritingSubmit(roomId) {
+    return api.post(`/rooms/${roomId}/writing-submit/confirm`)
+  },
+  getWritingDocState(roomId) {
+    return api.get(`/rooms/${roomId}/writing-doc`)
+  },
+  getWritingDocHistory(roomId, params = {}) {
+    return api.get(`/rooms/${roomId}/writing-doc/history`, { params })
+  },
+  restoreWritingDocVersion(roomId, version) {
+    return api.post(`/rooms/${roomId}/writing-doc/restore`, { version })
+  },
+  saveWritingDocVersion(roomId) {
+    return api.post(`/rooms/${roomId}/writing-doc/save-version`)
   },
 }

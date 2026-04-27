@@ -14,9 +14,9 @@ _CACHE_MTIME: float | None = None
 
 class TimingConfig(BaseModel):
     silence_trigger_enabled: bool = True
-    silence_threshold_seconds: int = 180
+    silence_threshold_seconds: int = 120
     analysis_interval_minutes: int = 5
-    warmup_minutes: int = 2
+    warmup_minutes: int = 3
     agent_cooldown_seconds: int = 60
     global_intervention_limit_per_hour: int = 12
 

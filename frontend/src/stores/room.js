@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia'
+﻿import { defineStore } from 'pinia'
 import api from '../services/api.js'
 import { roomApi } from '../services/roomApi.js'
 
@@ -27,11 +27,17 @@ export const useRoomStore = defineStore('room', {
     renewingTaskScriptLock: false,
     releasingTaskScriptLock: false,
     ownTaskScriptLeaseId: '',
+
     timerStartedAt: null,
     timerDeadlineAt: null,
     timerStoppedAt: null,
     startingRoomTimer: false,
     roomTimerError: '',
+
+    writingSubmitState: null,
+    loadingWritingSubmit: false,
+    confirmingWritingSubmit: false,
+    writingSubmitError: '',
   }),
 
   getters: {
@@ -84,7 +90,7 @@ export const useRoomStore = defineStore('room', {
           this.currentTask = await api.get(`/tasks/${room.task_id}`)
         }
       } catch (error) {
-        this.contextError = error.response?.data?.detail || '加载房间上下文失败'
+        this.contextError = error.response?.data?.detail || 'Load room context failed'
         this.currentRoom = null
         this.currentTask = null
         this.taskScriptState = null
@@ -96,6 +102,7 @@ export const useRoomStore = defineStore('room', {
 
       await this.loadTaskScriptState(roomId)
       await this.loadTaskScriptLockState(roomId)
+      await this.loadWritingSubmitState(roomId)
     },
 
     async updateCurrentTask(patch) {
@@ -108,10 +115,10 @@ export const useRoomStore = defineStore('room', {
           this.currentTask = nextTask
         } else {
           if (!this.currentRoomId || !this.currentRoom) {
-            throw new Error('当前房间信息不存在，无法绑定任务')
+            throw new Error('Current room context is missing, cannot bind task')
           }
           const createdTask = await api.post('/tasks', {
-            title: '任务',
+            title: 'Task',
             requirements: patch.requirements ?? null,
             scripts: patch.scripts ?? null,
           })
@@ -129,26 +136,45 @@ export const useRoomStore = defineStore('room', {
           await this.loadTaskScriptLockState(this.currentRoomId)
         }
       } catch (error) {
-        this.taskSaveError = error.response?.data?.detail || error.message || '保存任务失败'
+        this.taskSaveError = error.response?.data?.detail || error.message || 'Save task failed'
         throw error
       } finally {
         this.savingTask = false
       }
     },
 
-    async startOrResetRoomTimer(roomId = this.currentRoomId) {
+    async startRoomTimer(roomId = this.currentRoomId) {
       if (!roomId) return null
       this.startingRoomTimer = true
       this.roomTimerError = ''
       try {
-        const room = await roomApi.startOrResetRoomTimer(roomId)
+        const room = await roomApi.startRoomTimer(roomId)
         if (String(room?.id || '') === this.currentRoomId) {
           this.currentRoom = room
           this.syncTimerFromRoom(room)
         }
         return room
       } catch (error) {
-        this.roomTimerError = error.response?.data?.detail || error.message || '计时器操作失败'
+        this.roomTimerError = error.response?.data?.detail || error.message || 'Timer action failed'
+        throw error
+      } finally {
+        this.startingRoomTimer = false
+      }
+    },
+
+    async resetRoomTimer(roomId = this.currentRoomId) {
+      if (!roomId) return null
+      this.startingRoomTimer = true
+      this.roomTimerError = ''
+      try {
+        const room = await roomApi.resetRoomTimer(roomId)
+        if (String(room?.id || '') === this.currentRoomId) {
+          this.currentRoom = room
+          this.syncTimerFromRoom(room)
+        }
+        return room
+      } catch (error) {
+        this.roomTimerError = error.response?.data?.detail || error.message || 'Timer action failed'
         throw error
       } finally {
         this.startingRoomTimer = false
@@ -163,7 +189,7 @@ export const useRoomStore = defineStore('room', {
         this.taskScriptState = await roomApi.getTaskScriptState(roomId)
       } catch (error) {
         this.taskScriptState = null
-        this.taskScriptError = error.response?.data?.detail || '加载任务流程状态失败'
+        this.taskScriptError = error.response?.data?.detail || 'Load task script state failed'
       } finally {
         this.loadingTaskScript = false
       }
@@ -179,7 +205,7 @@ export const useRoomStore = defineStore('room', {
           this.taskScriptLockNotice = ''
         }
       } catch (error) {
-        this.taskScriptLockError = error.response?.data?.detail || '加载编辑锁状态失败'
+        this.taskScriptLockError = error.response?.data?.detail || 'Load edit lock state failed'
       } finally {
         this.loadingTaskScriptLock = false
       }
@@ -198,12 +224,12 @@ export const useRoomStore = defineStore('room', {
           this.taskScriptLockNotice = ''
         }
         if (!result.acquired) {
-          const ownerName = result?.lock?.owner_display_name || '其他同学'
-          this.taskScriptLockNotice = `当前由 ${ownerName} 正在编辑，你的输入已保留，可稍后重试。`
+          const ownerName = result?.lock?.owner_display_name || 'Another student'
+          this.taskScriptLockNotice = `Currently edited by ${ownerName}. Your input is preserved, please try again later.`
         }
         return result
       } catch (error) {
-        this.taskScriptLockError = error.response?.data?.detail || error.message || '获取编辑锁失败'
+        this.taskScriptLockError = error.response?.data?.detail || error.message || 'Acquire edit lock failed'
         return null
       } finally {
         this.acquiringTaskScriptLock = false
@@ -221,7 +247,7 @@ export const useRoomStore = defineStore('room', {
         return result
       } catch (error) {
         this.ownTaskScriptLeaseId = ''
-        this.taskScriptLockNotice = error.response?.data?.detail || '编辑锁已失效，请重新进入编辑'
+        this.taskScriptLockNotice = error.response?.data?.detail || 'Edit lock expired, please re-enter editing mode'
         return null
       } finally {
         this.renewingTaskScriptLock = false
@@ -239,7 +265,7 @@ export const useRoomStore = defineStore('room', {
         this.taskScriptLockNotice = ''
         return result
       } catch (error) {
-        this.taskScriptLockError = error.response?.data?.detail || '释放编辑锁失败'
+        this.taskScriptLockError = error.response?.data?.detail || 'Release edit lock failed'
         return null
       } finally {
         this.releasingTaskScriptLock = false
@@ -257,7 +283,7 @@ export const useRoomStore = defineStore('room', {
         this.taskScriptLockNotice = ''
         await this.loadTaskScriptLockState(this.currentRoomId)
       } catch (error) {
-        this.taskScriptError = error.response?.data?.detail || '主持智能体提案生成失败'
+        this.taskScriptError = error.response?.data?.detail || 'Generate facilitator proposal failed'
         throw error
       } finally {
         this.requestingTaskScriptProposal = false
@@ -275,10 +301,63 @@ export const useRoomStore = defineStore('room', {
         this.taskScriptLockNotice = ''
         await this.loadTaskScriptLockState(this.currentRoomId)
       } catch (error) {
-        this.taskScriptError = error.response?.data?.detail || '确认流程提案失败'
+        this.taskScriptError = error.response?.data?.detail || 'Confirm proposal failed'
         throw error
       } finally {
         this.confirmingTaskScriptProposal = false
+      }
+    },
+
+    applyWritingSubmitUpdate(payload = {}) {
+      const payloadRoomId = String(payload.room_id || '')
+      if (!payloadRoomId || payloadRoomId !== this.currentRoomId) return
+      const state = payload.state || {}
+      this.writingSubmitState = {
+        required_confirmations: Number(state.required_confirmations || 3),
+        confirmations: Array.isArray(state.confirmations) ? state.confirmations : [],
+        final_submitted_at: state.final_submitted_at || null,
+      }
+    },
+
+    async loadWritingSubmitState(roomId = this.currentRoomId) {
+      if (!roomId) return
+      this.loadingWritingSubmit = true
+      this.writingSubmitError = ''
+      try {
+        const state = await roomApi.getWritingSubmitState(roomId)
+        this.writingSubmitState = {
+          required_confirmations: Number(state.required_confirmations || 3),
+          confirmations: Array.isArray(state.confirmations) ? state.confirmations : [],
+          final_submitted_at: state.final_submitted_at || null,
+        }
+      } catch (error) {
+        this.writingSubmitError = error.response?.data?.detail || 'Load writing submit state failed'
+        this.writingSubmitState = {
+          required_confirmations: 3,
+          confirmations: [],
+          final_submitted_at: null,
+        }
+      } finally {
+        this.loadingWritingSubmit = false
+      }
+    },
+
+    async confirmWritingSubmit(roomId = this.currentRoomId) {
+      if (!roomId) return
+      this.confirmingWritingSubmit = true
+      this.writingSubmitError = ''
+      try {
+        const state = await roomApi.confirmWritingSubmit(roomId)
+        this.writingSubmitState = {
+          required_confirmations: Number(state.required_confirmations || 3),
+          confirmations: Array.isArray(state.confirmations) ? state.confirmations : [],
+          final_submitted_at: state.final_submitted_at || null,
+        }
+      } catch (error) {
+        this.writingSubmitError = error.response?.data?.detail || 'Confirm writing submission failed'
+        throw error
+      } finally {
+        this.confirmingWritingSubmit = false
       }
     },
   },

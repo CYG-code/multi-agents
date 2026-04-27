@@ -1,6 +1,7 @@
 from typing import Optional
 from uuid import UUID
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from app.models.room_member import RoomMember
 from app.models.user import User, UserRole
 from app.schemas.message import MessageHistoryResponse
 from app.schemas.room import (
+    RoomActivityRequest,
     RoomCreate,
     RoomDeleteRequest,
     RoomResponse,
@@ -21,8 +23,12 @@ from app.schemas.room import (
     RoomUpdate,
     TaskScriptConfirmRequest,
     TaskScriptLeaseRequest,
+    WritingSubmitStateResponse,
+    WritingDocStateResponse,
+    WritingDocHistoryResponse,
+    WritingDocRestoreRequest,
 )
-from app.services import room_service, task_script_service, task_service
+from app.services import room_service, task_script_service, task_service, writing_submit_service, writing_doc_service
 from app.services.message_service import MessageService
 
 router = APIRouter()
@@ -39,18 +45,86 @@ async def _ensure_room_member(db: AsyncSession, room_id: UUID, user_id: UUID) ->
         raise RoomMemberForbiddenError()
 
 
+async def _touch_room_activity(room_id: str) -> None:
+    try:
+        redis_client = get_redis_client()
+    except RuntimeError:
+        return
+    now_ts = time.time()
+    await redis_client.set(f"room:{room_id}:last_activity_time", now_ts)
+    await redis_client.sadd("active_rooms", room_id)
+
+
+async def _publish_room_timer_update(room) -> None:
+    try:
+        redis_client = get_redis_client()
+        payload = {
+            "type": "room:timer_updated",
+            "room_id": str(room.id),
+            "timer_started_at": room.timer_started_at.isoformat() if room.timer_started_at else None,
+            "timer_deadline_at": room.timer_deadline_at.isoformat() if room.timer_deadline_at else None,
+            "timer_stopped_at": room.timer_stopped_at.isoformat() if room.timer_stopped_at else None,
+        }
+        await redis_client.publish(f"room:{room.id}", json.dumps(payload, ensure_ascii=False))
+    except RuntimeError:
+        pass
+
+
+async def _publish_writing_submit_updated(room_id: str, state: dict) -> None:
+    try:
+        redis_client = get_redis_client()
+        payload = {
+            "type": "room:writing_submit_updated",
+            "room_id": room_id,
+            "state": state,
+        }
+        await redis_client.publish(f"room:{room_id}", json.dumps(payload, ensure_ascii=False))
+    except RuntimeError:
+        pass
+
+
+async def _publish_writing_doc_updated(room_id: str, state: dict, reason: str = "updated") -> None:
+    try:
+        redis_client = get_redis_client()
+        payload = {
+            "type": "writing:updated",
+            "room_id": room_id,
+            "content": state.get("content") or "",
+            "version": int(state.get("version") or 0),
+            "updated_at": state.get("updated_at"),
+            "updated_by": state.get("updated_by"),
+            "updated_by_display_name": state.get("updated_by_display_name"),
+            "reason": reason,
+        }
+        await redis_client.publish(f"room:{room_id}", json.dumps(payload, ensure_ascii=False))
+    except RuntimeError:
+        pass
+
+
+async def _get_online_count(room_id: str) -> int | None:
+    try:
+        redis_client = get_redis_client()
+    except RuntimeError:
+        return None
+    return int(await redis_client.scard(f"room:{room_id}:online_users"))
+
+
 @router.get("", response_model=list[RoomResponse])
 async def list_rooms(
     status: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     rooms = await room_service.get_rooms(db, status)
+    if current_user.role == UserRole.student:
+        rooms = [room for room in rooms if room.timer_stopped_at is None]
     result = []
     for room in rooms:
         count = await room_service.get_member_count(db, room.id)
+        online_count = await _get_online_count(str(room.id))
         resp = RoomResponse.model_validate(room)
         resp.member_count = count
+        resp.online_count = online_count if online_count is not None else count
         result.append(resp)
     return result
 
@@ -75,8 +149,10 @@ async def get_room(
     if not room:
         raise RoomNotFoundError()
     count = await room_service.get_member_count(db, room.id)
+    online_count = await _get_online_count(str(room.id))
     resp = RoomResponse.model_validate(room)
     resp.member_count = count
+    resp.online_count = online_count if online_count is not None else count
     return resp
 
 
@@ -105,8 +181,10 @@ async def update_room(
         raise RoomNotFoundError()
     room = await room_service.update_room_status(db, room, data.status)
     count = await room_service.get_member_count(db, room.id)
+    online_count = await _get_online_count(str(room.id))
     resp = RoomResponse.model_validate(room)
     resp.member_count = count
+    resp.online_count = online_count if online_count is not None else count
     return resp
 
 
@@ -127,13 +205,15 @@ async def bind_room_task(
 
     room = await room_service.bind_room_task(db, room, data.task_id)
     count = await room_service.get_member_count(db, room.id)
+    online_count = await _get_online_count(str(room.id))
     resp = RoomResponse.model_validate(room)
     resp.member_count = count
+    resp.online_count = online_count if online_count is not None else count
     return resp
 
 
 @router.post("/{room_id}/timer/start", response_model=RoomResponse, status_code=200)
-async def start_or_reset_room_timer(
+async def start_room_timer(
     room_id: UUID,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_teacher),
@@ -142,25 +222,51 @@ async def start_or_reset_room_timer(
     if not room:
         raise RoomNotFoundError()
 
-    room = await room_service.start_or_reset_room_timer(db, room)
+    room = await room_service.start_room_timer(db, room)
+    writing_state = await writing_submit_service.clear_writing_submit_state(str(room.id))
     count = await room_service.get_member_count(db, room.id)
 
     try:
         redis_client = get_redis_client()
         await redis_client.sadd("active_rooms", str(room.id))
-        payload = {
-            "type": "room:timer_updated",
-            "room_id": str(room.id),
-            "timer_started_at": room.timer_started_at.isoformat() if room.timer_started_at else None,
-            "timer_deadline_at": room.timer_deadline_at.isoformat() if room.timer_deadline_at else None,
-            "timer_stopped_at": room.timer_stopped_at.isoformat() if room.timer_stopped_at else None,
-        }
-        await redis_client.publish(f"room:{room.id}", json.dumps(payload, ensure_ascii=False))
     except RuntimeError:
         pass
+    await _publish_room_timer_update(room)
+    await _publish_writing_submit_updated(str(room.id), writing_state)
 
     resp = RoomResponse.model_validate(room)
     resp.member_count = count
+    online_count = await _get_online_count(str(room.id))
+    resp.online_count = online_count if online_count is not None else count
+    return resp
+
+
+@router.post("/{room_id}/timer/reset", response_model=RoomResponse, status_code=200)
+async def reset_room_timer(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_teacher),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+
+    room = await room_service.reset_room_timer(db, room)
+    writing_state = await writing_submit_service.clear_writing_submit_state(str(room.id))
+    count = await room_service.get_member_count(db, room.id)
+
+    try:
+        redis_client = get_redis_client()
+        await redis_client.srem("active_rooms", str(room.id))
+    except RuntimeError:
+        pass
+    await _publish_room_timer_update(room)
+    await _publish_writing_submit_updated(str(room.id), writing_state)
+
+    resp = RoomResponse.model_validate(room)
+    resp.member_count = count
+    online_count = await _get_online_count(str(room.id))
+    resp.online_count = online_count if online_count is not None else count
     return resp
 
 
@@ -187,7 +293,13 @@ async def delete_room(
         await redis_client.delete(
             f"agent_queue:{room_id_str}",
             f"room:{room_id_str}:last_msg_time",
+            f"room:{room_id_str}:last_activity_time",
             f"room:{room_id_str}:start_time",
+            f"room:{room_id_str}:online_users",
+            f"room:{room_id_str}:online_user_conn_counts",
+            f"room:{room_id_str}:writing_doc_state",
+            f"room:{room_id_str}:writing_doc_version",
+            f"room:{room_id_str}:writing_submit_state",
             f"room:{room_id_str}:agent_lock",
             f"room:{room_id_str}:recent_senders",
             f"trigger_lock:{room_id_str}:silence",
@@ -214,6 +326,143 @@ async def get_messages(
     await _ensure_room_member(db, room_id, current_user.id)
 
     return await MessageService.get_history_messages(db, str(room_id), before_seq, limit)
+
+
+@router.post("/{room_id}/activity", status_code=200)
+async def report_room_activity(
+    room_id: UUID,
+    data: RoomActivityRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+
+    await _touch_room_activity(str(room_id))
+    return {"ok": True, "activity_type": data.activity_type}
+
+
+@router.get("/{room_id}/writing-doc", response_model=WritingDocStateResponse, status_code=200)
+async def get_writing_doc_state(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+
+    state = await writing_doc_service.get_writing_doc_state(str(room_id))
+    return WritingDocStateResponse.model_validate(state)
+
+
+@router.get("/{room_id}/writing-doc/history", response_model=WritingDocHistoryResponse, status_code=200)
+async def get_writing_doc_history(
+    room_id: UUID,
+    limit: int = Query(3, ge=1, le=10),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+
+    items = await writing_doc_service.get_writing_doc_history(str(room_id), limit=limit)
+    return WritingDocHistoryResponse.model_validate({"items": items})
+
+
+@router.post("/{room_id}/writing-doc/save-version", response_model=WritingDocHistoryResponse, status_code=200)
+async def save_writing_doc_version(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+    if current_user.role != UserRole.student:
+        raise HTTPException(status_code=403, detail="Only students can save writing versions")
+
+    try:
+        await writing_doc_service.save_writing_doc_version(
+            str(room_id),
+            saved_by=str(current_user.id),
+            saved_by_display_name=current_user.display_name,
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Writing doc is empty")
+
+    items = await writing_doc_service.get_writing_doc_history(str(room_id), limit=3)
+    return WritingDocHistoryResponse.model_validate({"items": items})
+
+
+@router.post("/{room_id}/writing-doc/restore", response_model=WritingDocStateResponse, status_code=200)
+async def restore_writing_doc_version(
+    room_id: UUID,
+    data: WritingDocRestoreRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_teacher),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+
+    try:
+        state = await writing_doc_service.restore_writing_doc_version(
+            str(room_id),
+            target_version=data.version,
+            updated_by=str(current_user.id),
+            updated_by_display_name=current_user.display_name,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Writing doc version not found")
+
+    await _touch_room_activity(str(room_id))
+    await _publish_writing_doc_updated(str(room_id), state, reason="restored")
+    return WritingDocStateResponse.model_validate(state)
+
+
+@router.get("/{room_id}/writing-submit", response_model=WritingSubmitStateResponse, status_code=200)
+async def get_writing_submit_state(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+
+    state = await writing_submit_service.get_writing_submit_state(str(room_id))
+    return WritingSubmitStateResponse.model_validate(state)
+
+
+@router.post("/{room_id}/writing-submit/confirm", response_model=WritingSubmitStateResponse, status_code=200)
+async def confirm_writing_submit(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+    if current_user.role != UserRole.student:
+        raise HTTPException(status_code=403, detail="Only students can confirm writing submission")
+
+    state, finalized = await writing_submit_service.confirm_writing_submit(str(room_id), current_user)
+    if finalized:
+        room = await room_service.stop_room_timer(db, room)
+        await _publish_room_timer_update(room)
+
+    await _touch_room_activity(str(room_id))
+    await _publish_writing_submit_updated(str(room_id), state)
+    return WritingSubmitStateResponse.model_validate(state)
 
 
 @router.get("/{room_id}/task-script", status_code=200)

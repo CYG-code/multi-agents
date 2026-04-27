@@ -1,4 +1,5 @@
 import redis.asyncio as redis
+import time
 
 from app.config import settings
 
@@ -21,6 +22,67 @@ async def close_redis() -> None:
     if _redis_client is not None:
         await _redis_client.aclose()
         _redis_client = None
+
+
+async def clear_online_presence_keys() -> None:
+    """Clear stale online presence keys left by ungraceful disconnect/restart."""
+    client = get_redis_client()
+    patterns = (
+        "room:*:online_users",
+        "room:*:online_user_conn_counts",
+    )
+    for pattern in patterns:
+        async for key in client.scan_iter(match=pattern, count=200):
+            await client.delete(key)
+
+
+async def touch_online_presence(room_id: str, user_id: str, ts: float | None = None) -> None:
+    client = get_redis_client()
+    now_ts = ts if ts is not None else time.time()
+    await client.hset(f"room:{room_id}:online_user_last_seen", user_id, str(now_ts))
+
+
+async def cleanup_stale_online_presence(stale_seconds: int = 120) -> None:
+    """
+    Remove stale online users by last-seen heartbeat.
+    A user is stale when now - last_seen > stale_seconds.
+    """
+    client = get_redis_client()
+    now_ts = time.time()
+
+    async for last_seen_key in client.scan_iter(match="room:*:online_user_last_seen", count=200):
+        room_id = last_seen_key[len("room:") : -len(":online_user_last_seen")]
+        online_users_key = f"room:{room_id}:online_users"
+        conn_counts_key = f"room:{room_id}:online_user_conn_counts"
+
+        last_seen_map = await client.hgetall(last_seen_key)
+        stale_user_ids: list[str] = []
+        alive_user_ids: set[str] = set()
+
+        for user_id, raw_ts in last_seen_map.items():
+            try:
+                age_seconds = now_ts - float(raw_ts)
+            except (TypeError, ValueError):
+                stale_user_ids.append(user_id)
+                continue
+            if age_seconds > stale_seconds:
+                stale_user_ids.append(user_id)
+            else:
+                alive_user_ids.add(user_id)
+
+        if stale_user_ids:
+            await client.hdel(last_seen_key, *stale_user_ids)
+            await client.srem(online_users_key, *stale_user_ids)
+            await client.hdel(conn_counts_key, *stale_user_ids)
+
+        online_users = await client.smembers(online_users_key)
+        dangling_users = [uid for uid in online_users if uid not in alive_user_ids]
+        if dangling_users:
+            await client.srem(online_users_key, *dangling_users)
+            await client.hdel(conn_counts_key, *dangling_users)
+
+        if int(await client.hlen(last_seen_key)) == 0:
+            await client.delete(last_seen_key)
 
 
 def get_redis_client() -> redis.Redis:

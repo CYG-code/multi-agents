@@ -1,7 +1,8 @@
 from uuid import UUID
 from typing import Optional
+from typing import Literal
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from app.models.room import RoomStatus
 
 
@@ -34,6 +35,43 @@ class TaskScriptLeaseRequest(BaseModel):
     lease_id: str
 
 
+class RoomActivityRequest(BaseModel):
+    activity_type: Literal["chat", "writing", "task_edit"] = "writing"
+
+
+class WritingSubmitStateResponse(BaseModel):
+    required_confirmations: int = 3
+    confirmations: list[dict] = Field(default_factory=list)
+    final_submitted_at: Optional[datetime] = None
+
+
+class WritingDocStateResponse(BaseModel):
+    content: str = ""
+    version: int = 0
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+    updated_by_display_name: Optional[str] = None
+
+
+class WritingDocHistoryItem(BaseModel):
+    content: str = ""
+    version: int = 0
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+    updated_by_display_name: Optional[str] = None
+    saved_at: Optional[datetime] = None
+    saved_by: Optional[str] = None
+    saved_by_display_name: Optional[str] = None
+
+
+class WritingDocHistoryResponse(BaseModel):
+    items: list[WritingDocHistoryItem] = Field(default_factory=list)
+
+
+class WritingDocRestoreRequest(BaseModel):
+    version: int
+
+
 class RoomResponse(BaseModel):
     id: UUID
     name: str
@@ -41,6 +79,7 @@ class RoomResponse(BaseModel):
     created_by: UUID
     status: RoomStatus
     member_count: int = 0
+    online_count: int = 0
     timer_started_at: Optional[datetime] = None
     timer_deadline_at: Optional[datetime] = None
     timer_stopped_at: Optional[datetime] = None

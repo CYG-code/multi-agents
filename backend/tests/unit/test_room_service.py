@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -46,3 +47,35 @@ async def test_get_room_returns_result_from_db(fake_db):
 async def test_delete_room_commits(fake_db):
     await room_service.delete_room(fake_db, uuid.uuid4())
     assert fake_db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_start_room_timer_sets_timer_fields(fake_db):
+    room = Room(name="timer", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+
+    updated = await room_service.start_room_timer(fake_db, room, duration_minutes=90)
+
+    assert updated.timer_started_at is not None
+    assert updated.timer_deadline_at is not None
+    assert updated.timer_stopped_at is None
+    delta = updated.timer_deadline_at - updated.timer_started_at
+    assert int(delta.total_seconds()) == 90 * 60
+    assert updated.timer_started_at.tzinfo == timezone.utc
+    assert fake_db.commits == 1
+    assert fake_db.refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_reset_room_timer_clears_timer_fields(fake_db):
+    room = Room(name="timer", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+    room.timer_started_at = datetime.now(timezone.utc)
+    room.timer_deadline_at = room.timer_started_at
+    room.timer_stopped_at = room.timer_started_at
+
+    updated = await room_service.reset_room_timer(fake_db, room)
+
+    assert updated.timer_started_at is None
+    assert updated.timer_deadline_at is None
+    assert updated.timer_stopped_at is None
+    assert fake_db.commits == 1
+    assert fake_db.refreshes == 1
