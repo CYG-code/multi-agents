@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 
 from app.agents import llm_client
 from app.agents.model_pool import MODEL_CANDIDATES

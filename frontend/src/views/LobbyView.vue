@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="min-h-screen bg-gray-100">
     <header class="flex items-center justify-between bg-white px-6 py-4 shadow-sm">
       <h1 class="text-lg font-bold text-gray-800">协作学习平台 - 大厅</h1>

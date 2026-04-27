@@ -4,6 +4,7 @@ import time
 
 from app.agents.queue import enqueue_task
 from app.agents.settings import get_agent_settings
+from app.analysis.timer_phase import get_elapsed_seconds_from_timer_start
 from app.db.redis_client import get_redis_client
 
 
@@ -16,6 +17,11 @@ class TriggerDetector:
             return
 
         threshold = max(2, int(cfg.thresholds.monopoly_message_count))
+        elapsed_seconds = await get_elapsed_seconds_from_timer_start(room_id)
+        warmup_seconds = cfg.timing.warmup_minutes * 60
+        if elapsed_seconds is None or elapsed_seconds < warmup_seconds:
+            # Monopoly trigger is disabled before teacher starts timer and during warmup.
+            return
 
         redis_client = get_redis_client()
         key = f"room:{room_id}:recent_senders"

@@ -1,4 +1,4 @@
-﻿param(
+param(
   [switch]$Lan,
   [int]$Port = 8000,
   [switch]$Reload

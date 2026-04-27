@@ -109,13 +109,17 @@ const sourceMessage = computed(() => {
 })
 
 const replyTargetText = computed(() => {
-  if (!isAgent.value || !sourceMessage.value) return ''
-  return sourceMessage.value.display_name || '某位同学'
+  if (!isAgent.value) return ''
+  if (sourceMessage.value?.display_name) return sourceMessage.value.display_name
+  if (props.message?.source_display_name_snapshot) return props.message.source_display_name_snapshot
+  return ''
 })
 
 const sourcePreviewText = computed(() => {
-  if (!isAgent.value || !sourceMessage.value?.content) return ''
-  const raw = sourceMessage.value.content.replace(/\s+/g, ' ').trim()
+  if (!isAgent.value) return ''
+  const base = sourceMessage.value?.content || props.message?.source_content_preview_snapshot || ''
+  if (!base) return ''
+  const raw = base.replace(/\s+/g, ' ').trim()
   if (!raw) return ''
   return raw.length > 36 ? `${raw.slice(0, 36)}...` : raw
 })

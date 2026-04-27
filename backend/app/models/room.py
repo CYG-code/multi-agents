@@ -24,3 +24,5 @@ class Room(Base):
     status = Column(Enum(RoomStatus), default=RoomStatus.waiting, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     ended_at = Column(DateTime(timezone=True), nullable=True)
+    timer_started_at = Column(DateTime(timezone=True), nullable=True)
+    timer_deadline_at = Column(DateTime(timezone=True), nullable=True)

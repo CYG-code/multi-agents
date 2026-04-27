@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="flex flex-col h-full border border-gray-200 bg-white">
     <div class="p-3 border-b border-gray-100 flex items-center justify-between">
       <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Realtime Chat Room</p>
@@ -55,10 +55,12 @@ import { useWebSocket } from '../../composables/useWebSocket.js'
 import { useAgentStore } from '../../stores/agent.js'
 import { useAuthStore } from '../../stores/auth.js'
 import { useChatStore } from '../../stores/chat.js'
+import { useRoomStore } from '../../stores/room.js'
 
 const route = useRoute()
 const authStore = useAuthStore()
 const chatStore = useChatStore()
+const roomStore = useRoomStore()
 const agentStore = useAgentStore()
 const roomId = String(route.params.id || '')
 
@@ -277,12 +279,30 @@ onMounted(async () => {
     }
   })
 
+  on('task_script:updated', async () => {
+    try {
+      await roomStore.loadTaskScriptState(roomId)
+      await roomStore.loadTaskScriptLockState(roomId)
+    } catch (error) {
+      // ignore transient sync failures
+    }
+  })
+
+  on('room:timer_updated', (data) => {
+    roomStore.applyRoomTimerUpdate(data)
+  })
+
   // Re-sync history after reconnect to avoid message gaps.
   on('__reconnect__', async () => {
     unreadCount.value = 0
     agentStore.clearTyping()
     invokeStatusMap.value = new Map()
     await reloadHistory()
+    try {
+      await roomStore.loadRoomContext(roomId, true)
+    } catch (error) {
+      // ignore transient sync failures
+    }
   })
 
   connect()

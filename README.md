@@ -91,3 +91,32 @@ cd d:\Projects\multi-agents\frontend
 npm run dev
 npm run dev:lan
 ```
+
+## Encoding Guard
+
+This repo now includes a UTF-8 guard to reduce encoding corruption:
+
+1. `.editorconfig` enforces `charset = utf-8`.
+2. `.gitattributes` normalizes text file handling in Git.
+3. `scripts/check-utf8.ps1` validates tracked text files are UTF-8.
+
+Run check:
+
+```powershell
+cd d:\Projects\multi-agents
+.\scripts\check-utf8.ps1
+```
+
+Strict mode (also fail on UTF-8 BOM):
+
+```powershell
+cd d:\Projects\multi-agents
+.\scripts\check-utf8.ps1 -FailOnBom
+```
+
+Auto-fix UTF-8 BOM for tracked text files:
+
+```powershell
+cd d:\Projects\multi-agents
+.\scripts\check-utf8.ps1 -FixBom
+```

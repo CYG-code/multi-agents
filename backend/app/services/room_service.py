@@ -1,5 +1,6 @@
 from uuid import UUID
 from typing import Optional
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +58,15 @@ async def update_room_status(db: AsyncSession, room: Room, status: RoomStatus) -
 
 async def bind_room_task(db: AsyncSession, room: Room, task_id: UUID) -> Room:
     room.task_id = task_id
+    await db.commit()
+    await db.refresh(room)
+    return room
+
+
+async def start_or_reset_room_timer(db: AsyncSession, room: Room, duration_minutes: int = 90) -> Room:
+    now = datetime.now(timezone.utc)
+    room.timer_started_at = now
+    room.timer_deadline_at = now + timedelta(minutes=duration_minutes)
     await db.commit()
     await db.refresh(room)
     return room

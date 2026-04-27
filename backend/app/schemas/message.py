@@ -15,8 +15,11 @@ class MessageItem(BaseModel):
     seq_num: int
     sender_type: Literal["student", "agent"]
     sender_id: str | None = None
+    source_message_id: str | None = None
     display_name: str | None = None
+    source_display_name_snapshot: str | None = None
     agent_role: str | None = None
+    source_content_preview_snapshot: str | None = None
     content: str
     status: Literal["streaming", "ok", "failed"]
     created_at: str | None = None
@@ -28,4 +31,3 @@ class MessageHistoryResponse(BaseModel):
     messages: list[MessageItem]
     has_more: bool
     oldest_seq: int | None = None
-

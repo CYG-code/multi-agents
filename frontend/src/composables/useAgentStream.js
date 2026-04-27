@@ -1,4 +1,4 @@
-﻿import { ref } from 'vue'
+import { ref } from 'vue'
 import { useAgentStore } from '../stores/agent.js'
 import { useChatStore } from '../stores/chat.js'
 
@@ -11,7 +11,14 @@ export function useAgentStream() {
     agentStore.setTyping(agent_role, is_typing)
   }
 
-  function handleStream({ agent_role, message_id, token, source_message_id }) {
+  function handleStream({
+    agent_role,
+    message_id,
+    token,
+    source_message_id,
+    source_display_name_snapshot,
+    source_content_preview_snapshot,
+  }) {
     if (!streamBuffers.value.has(message_id)) {
       streamBuffers.value.set(message_id, '')
       chatStore.addMessage({
@@ -19,6 +26,8 @@ export function useAgentStream() {
         sender_type: 'agent',
         agent_role,
         source_message_id,
+        source_display_name_snapshot,
+        source_content_preview_snapshot,
         content: '',
         status: 'streaming',
         created_at: new Date().toISOString(),
@@ -30,7 +39,17 @@ export function useAgentStream() {
     chatStore.updateMessageContent(message_id, current)
   }
 
-  function handleStreamEnd({ message_id, status, content, created_at, agent_role, error, source_message_id }) {
+  function handleStreamEnd({
+    message_id,
+    status,
+    content,
+    created_at,
+    agent_role,
+    error,
+    source_message_id,
+    source_display_name_snapshot,
+    source_content_preview_snapshot,
+  }) {
     streamBuffers.value.delete(message_id)
     const normalizedContent = (content || '').trim()
 
@@ -40,6 +59,8 @@ export function useAgentStream() {
         sender_type: 'agent',
         agent_role,
         source_message_id,
+        source_display_name_snapshot,
+        source_content_preview_snapshot,
         content:
           status === 'failed'
             ? `Agent call failed${error ? `: ${error}` : ''}`
@@ -58,6 +79,8 @@ export function useAgentStream() {
           : content,
       created_at,
       source_message_id: source_message_id || undefined,
+      source_display_name_snapshot: source_display_name_snapshot || undefined,
+      source_content_preview_snapshot: source_content_preview_snapshot || undefined,
     })
   }
 

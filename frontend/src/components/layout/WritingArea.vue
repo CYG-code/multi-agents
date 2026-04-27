@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="flex h-full flex-col rounded-lg border border-gray-200 bg-white p-3">
     <div class="mb-2 flex items-center justify-between">
       <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">写作区</p>

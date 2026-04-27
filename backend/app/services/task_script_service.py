@@ -9,9 +9,12 @@ from fastapi import HTTPException
 from app.agents.context_builder import get_recent_messages, get_room_context
 from app.agents.llm_client import stream_completion
 from app.agents.settings import get_agent_settings
+from app.db.redis_client import get_redis_client
 from app.models.room import Room
 from app.models.user import User
 from app.services import task_service
+
+LOCK_TTL_SECONDS = 120
 
 
 def _to_text(value) -> str:
@@ -52,14 +55,76 @@ def _normalize_scripts(raw_scripts) -> dict:
     }
 
 
-def get_task_script_state(task) -> dict:
-    state = _normalize_scripts(task.scripts if task else None)
+def _lock_key(room_id: str) -> str:
+    return f"task_script_lock:{room_id}"
+
+
+def _parse_lock_payload(raw_value: str | None) -> dict | None:
+    if not raw_value:
+        return None
+    try:
+        data = json.loads(raw_value)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _format_lock_public(data: dict | None, current_user_id: str | None = None) -> dict:
+    if not data:
+        return {
+            "locked": False,
+            "owner_user_id": None,
+            "owner_display_name": None,
+            "proposal_id": None,
+            "expires_at": None,
+            "is_mine": False,
+        }
+    owner_id = str(data.get("user_id") or "")
     return {
-        "task_id": str(task.id) if task else None,
-        "current_status": state["current_status"],
-        "next_goal": state["next_goal"],
-        "pending_proposal": state["pending_proposal"],
-        "history": state["history"],
+        "locked": True,
+        "owner_user_id": owner_id or None,
+        "owner_display_name": data.get("display_name") or None,
+        "proposal_id": data.get("proposal_id") or None,
+        "expires_at": data.get("expires_at") or None,
+        "is_mine": bool(current_user_id and owner_id and current_user_id == owner_id),
+    }
+
+
+async def _broadcast_task_script_updated(room_id: str, reason: str) -> None:
+    try:
+        redis_client = get_redis_client()
+        payload = {
+            "type": "task_script:updated",
+            "room_id": room_id,
+            "reason": reason,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        await redis_client.publish(f"room:{room_id}", json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        # State is already persisted; broadcast failure should not break core flow.
+        return
+
+
+async def _get_lock_raw(room_id: str) -> dict | None:
+    redis_client = get_redis_client()
+    raw = await redis_client.get(_lock_key(room_id))
+    return _parse_lock_payload(raw)
+
+
+def _build_lock_payload(user: User, proposal_id: str, lease_id: str) -> dict:
+    expires_at = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + LOCK_TTL_SECONDS,
+        tz=timezone.utc,
+    ).isoformat()
+    return {
+        "user_id": str(user.id),
+        "display_name": user.display_name,
+        "proposal_id": proposal_id,
+        "lease_id": lease_id,
+        "acquired_at": datetime.now(timezone.utc).isoformat(),
+        "expires_at": expires_at,
     }
 
 
@@ -85,27 +150,42 @@ def _extract_json_object(raw_text: str) -> dict:
     raise ValueError("cannot parse json object from model output")
 
 
+def get_task_script_state(task) -> dict:
+    state = _normalize_scripts(task.scripts if task else None)
+    return {
+        "task_id": str(task.id) if task else None,
+        "current_status": state["current_status"],
+        "next_goal": state["next_goal"],
+        "pending_proposal": state["pending_proposal"],
+        "history": state["history"],
+    }
+
+
+async def get_task_script_lock_state(room_id: str, current_user: User) -> dict:
+    lock_data = await _get_lock_raw(room_id)
+    return _format_lock_public(lock_data, str(current_user.id))
+
+
 async def _generate_facilitator_proposal(room_id: str) -> dict:
     context = await get_room_context(room_id)
     history = await get_recent_messages(room_id, limit=30)
 
     system_prompt = (
-        "你是学习小组主持智能体，现在要为“任务流程面板”产出一次更新提案。"
-        "请严格输出 JSON，不要输出任何额外文本。"
-        'JSON 结构必须为 {"current_status": "...", "next_goal": "...", "change_reason": "..."}。'
-        "要求：current_status 和 next_goal 要具体、可执行、50字内；change_reason 解释为什么现在要这样改。"
+        "You are the facilitator for a student collaboration room. "
+        "Generate a concise workflow update proposal for the task panel. "
+        "Output strict JSON only with keys: current_status, next_goal, change_reason."
     )
     messages = [
-        {"role": "user", "content": f"任务描述：{context.get('task_description', '')}"},
-        {"role": "user", "content": f"任务流程：{context.get('task_workflow', '')}"},
-        {"role": "user", "content": f"成员信息：{context.get('members_info', '')}"},
+        {"role": "user", "content": f"Task description: {context.get('task_description', '')}"},
+        {"role": "user", "content": f"Task workflow: {context.get('task_workflow', '')}"},
+        {"role": "user", "content": f"Members: {context.get('members_info', '')}"},
     ]
     for msg in history[-20:]:
         messages.append({"role": "user", "content": f"[{msg['display_name']}]: {msg['content']}"})
     messages.append(
         {
             "role": "user",
-            "content": "请根据以上讨论输出任务流程面板提案 JSON。",
+            "content": "Return JSON now. Keep each field actionable and concise.",
         }
     )
 
@@ -134,14 +214,24 @@ async def _generate_facilitator_proposal(room_id: str) -> dict:
 
 async def propose_facilitator_update(db, room: Room, current_user: User) -> dict:
     if not room.task_id:
-        raise HTTPException(status_code=400, detail="当前房间未绑定任务，无法生成流程提案")
+        raise HTTPException(status_code=400, detail="Room has no bound task")
     task = await task_service.get_task(db, room.task_id)
     if task is None:
-        raise HTTPException(status_code=400, detail="当前房间未绑定任务，无法生成流程提案")
+        raise HTTPException(status_code=400, detail="Room has no bound task")
 
     base = _normalize_scripts(task.scripts)
-    generated = await _generate_facilitator_proposal(str(room.id))
+    pending = base["pending_proposal"]
+    room_id = str(room.id)
+    if pending:
+        lock_data = await _get_lock_raw(room_id)
+        if lock_data and str(lock_data.get("user_id")) != str(current_user.id):
+            raise HTTPException(
+                status_code=409,
+                detail="Pending proposal is being edited by another student",
+            )
+        raise HTTPException(status_code=409, detail="There is already a pending proposal to confirm")
 
+    generated = await _generate_facilitator_proposal(room_id)
     proposal = {
         "id": str(uuid.uuid4()),
         "agent_role": "facilitator",
@@ -159,22 +249,138 @@ async def propose_facilitator_update(db, room: Room, current_user: User) -> dict
     }
     await db.commit()
     await db.refresh(task)
+    await _broadcast_task_script_updated(room_id, reason="proposal_created")
     return get_task_script_state(task)
 
 
-async def confirm_pending_proposal(db, room: Room, current_user: User, overrides: dict | None = None) -> dict:
+async def acquire_task_script_lock(db, room: Room, current_user: User) -> dict:
     if not room.task_id:
-        raise HTTPException(status_code=400, detail="当前房间未绑定任务")
+        raise HTTPException(status_code=400, detail="Room has no bound task")
     task = await task_service.get_task(db, room.task_id)
     if task is None:
-        raise HTTPException(status_code=400, detail="当前房间未绑定任务")
+        raise HTTPException(status_code=400, detail="Room has no bound task")
+    state = _normalize_scripts(task.scripts)
+    pending = state["pending_proposal"]
+    if not pending:
+        raise HTTPException(status_code=400, detail="No pending proposal to edit")
+
+    room_id = str(room.id)
+    proposal_id = str(pending.get("id") or "")
+    redis_client = get_redis_client()
+    key = _lock_key(room_id)
+
+    existing = await _get_lock_raw(room_id)
+    if existing:
+        if (
+            str(existing.get("user_id")) == str(current_user.id)
+            and str(existing.get("proposal_id")) == proposal_id
+        ):
+            lease_id = str(existing.get("lease_id") or str(uuid.uuid4()))
+            payload = _build_lock_payload(current_user, proposal_id=proposal_id, lease_id=lease_id)
+            await redis_client.setex(key, LOCK_TTL_SECONDS, json.dumps(payload, ensure_ascii=False))
+            await _broadcast_task_script_updated(room_id, reason="lock_acquired")
+            return {
+                "acquired": True,
+                "lease_id": lease_id,
+                "lock": _format_lock_public(payload, str(current_user.id)),
+            }
+
+        return {
+            "acquired": False,
+            "lease_id": None,
+            "lock": _format_lock_public(existing, str(current_user.id)),
+        }
+
+    lease_id = str(uuid.uuid4())
+    payload = _build_lock_payload(current_user, proposal_id=proposal_id, lease_id=lease_id)
+    acquired = await redis_client.set(key, json.dumps(payload, ensure_ascii=False), nx=True, ex=LOCK_TTL_SECONDS)
+    if not acquired:
+        latest = await _get_lock_raw(room_id)
+        return {
+            "acquired": False,
+            "lease_id": None,
+            "lock": _format_lock_public(latest, str(current_user.id)),
+        }
+    await _broadcast_task_script_updated(room_id, reason="lock_acquired")
+    return {
+        "acquired": True,
+        "lease_id": lease_id,
+        "lock": _format_lock_public(payload, str(current_user.id)),
+    }
+
+
+async def renew_task_script_lock(room_id: str, current_user: User, lease_id: str) -> dict:
+    redis_client = get_redis_client()
+    key = _lock_key(room_id)
+    existing = await _get_lock_raw(room_id)
+    if not existing:
+        raise HTTPException(status_code=409, detail="Lock no longer exists")
+    if str(existing.get("user_id")) != str(current_user.id):
+        raise HTTPException(status_code=409, detail="Lock is owned by another user")
+    if str(existing.get("lease_id")) != str(lease_id):
+        raise HTTPException(status_code=409, detail="Lease id mismatch")
+
+    proposal_id = str(existing.get("proposal_id") or "")
+    payload = _build_lock_payload(current_user, proposal_id=proposal_id, lease_id=lease_id)
+    await redis_client.setex(key, LOCK_TTL_SECONDS, json.dumps(payload, ensure_ascii=False))
+    return {"renewed": True, "lease_id": lease_id, "lock": _format_lock_public(payload, str(current_user.id))}
+
+
+async def release_task_script_lock(room_id: str, current_user: User, lease_id: str) -> dict:
+    redis_client = get_redis_client()
+    key = _lock_key(room_id)
+    existing = await _get_lock_raw(room_id)
+    if not existing:
+        return {"released": True, "lock": _format_lock_public(None, str(current_user.id))}
+    if str(existing.get("user_id")) != str(current_user.id):
+        raise HTTPException(status_code=409, detail="Lock is owned by another user")
+    if str(existing.get("lease_id")) != str(lease_id):
+        raise HTTPException(status_code=409, detail="Lease id mismatch")
+
+    await redis_client.delete(key)
+    await _broadcast_task_script_updated(room_id, reason="lock_released")
+    return {"released": True, "lock": _format_lock_public(None, str(current_user.id))}
+
+
+async def confirm_pending_proposal(
+    db,
+    room: Room,
+    current_user: User,
+    overrides: dict | None = None,
+    proposal_id: str | None = None,
+    lease_id: str | None = None,
+) -> dict:
+    if not room.task_id:
+        raise HTTPException(status_code=400, detail="Room has no bound task")
+    task = await task_service.get_task(db, room.task_id)
+    if task is None:
+        raise HTTPException(status_code=400, detail="Room has no bound task")
 
     base = _normalize_scripts(task.scripts)
     pending = base["pending_proposal"]
     if not pending:
-        raise HTTPException(status_code=400, detail="当前没有待确认提案")
-    overrides = overrides or {}
+        raise HTTPException(status_code=400, detail="No pending proposal to confirm")
 
+    pending_id = str(pending.get("id") or "")
+    if not proposal_id:
+        raise HTTPException(status_code=400, detail="proposal_id is required")
+    if str(proposal_id) != pending_id:
+        raise HTTPException(status_code=409, detail="Proposal has changed, please refresh")
+    if not lease_id:
+        raise HTTPException(status_code=400, detail="lease_id is required")
+
+    room_id = str(room.id)
+    lock_data = await _get_lock_raw(room_id)
+    if not lock_data:
+        raise HTTPException(status_code=409, detail="Edit lock expired, please re-enter edit mode")
+    if str(lock_data.get("proposal_id")) != pending_id:
+        raise HTTPException(status_code=409, detail="Proposal lock mismatch, please refresh")
+    if str(lock_data.get("user_id")) != str(current_user.id):
+        raise HTTPException(status_code=409, detail="Proposal is being edited by another student")
+    if str(lock_data.get("lease_id")) != str(lease_id):
+        raise HTTPException(status_code=409, detail="Lease id mismatch")
+
+    overrides = overrides or {}
     final_current_status = _to_text(overrides.get("current_status"))
     if not final_current_status:
         final_current_status = _to_text(pending.get("current_status"))
@@ -184,19 +390,17 @@ async def confirm_pending_proposal(db, room: Room, current_user: User, overrides
     student_feedback = _to_text(overrides.get("student_feedback"))
 
     if not final_current_status or not final_next_goal:
-        raise HTTPException(status_code=400, detail="确认内容不能为空，请补充后再确认")
+        raise HTTPException(status_code=400, detail="Confirm content cannot be empty")
 
     original_current_status = _to_text(pending.get("current_status"))
     original_next_goal = _to_text(pending.get("next_goal"))
-    student_adjusted = (
-        final_current_status != original_current_status or final_next_goal != original_next_goal
-    )
+    student_adjusted = final_current_status != original_current_status or final_next_goal != original_next_goal
 
     now_iso = datetime.now(timezone.utc).isoformat()
     new_history = list(base["history"])
     new_history.append(
         {
-            "id": pending.get("id") or str(uuid.uuid4()),
+            "id": pending_id or str(uuid.uuid4()),
             "agent_role": pending.get("agent_role") or "facilitator",
             "confirmed_at": now_iso,
             "confirmed_by": str(current_user.id),
@@ -218,4 +422,11 @@ async def confirm_pending_proposal(db, room: Room, current_user: User, overrides
     }
     await db.commit()
     await db.refresh(task)
+
+    try:
+        await release_task_script_lock(room_id, current_user, lease_id)
+    except HTTPException:
+        # Confirmation already succeeded; lock release conflict should not fail the main write.
+        pass
+    await _broadcast_task_script_updated(room_id, reason="proposal_confirmed")
     return get_task_script_state(task)

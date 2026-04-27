@@ -8,6 +8,7 @@ from app.agents.committee import basic_committee
 from app.agents.llm_client import refresh_model_routing
 from app.agents.queue import enqueue_task
 from app.agents.settings import get_agent_settings
+from app.analysis.timer_phase import get_elapsed_seconds_from_timer_start
 from app.db.redis_client import get_redis_client
 
 scheduler = AsyncIOScheduler()
@@ -32,8 +33,11 @@ async def check_silence() -> None:
         if not last_msg_time:
             continue
 
-        room_start_time = await redis_client.get(f"room:{room_id}:start_time")
-        if room_start_time and (now - float(room_start_time) < warmup_seconds):
+        elapsed_seconds = await get_elapsed_seconds_from_timer_start(room_id)
+        if elapsed_seconds is None:
+            # Timer has not started yet; time-based auto triggers are disabled.
+            continue
+        if elapsed_seconds < warmup_seconds:
             continue
 
         silence = now - float(last_msg_time)
@@ -68,7 +72,12 @@ async def check_committee_timer() -> None:
 
     redis_client = get_redis_client()
     active_rooms = await redis_client.smembers("active_rooms")
+    warmup_seconds = cfg.timing.warmup_minutes * 60
     for room_id in active_rooms:
+        elapsed_seconds = await get_elapsed_seconds_from_timer_start(room_id)
+        if elapsed_seconds is None or elapsed_seconds < warmup_seconds:
+            # Committee timer is also gated by teacher-started timer and warmup period.
+            continue
         await basic_committee.analyze_and_dispatch(room_id)
 
 

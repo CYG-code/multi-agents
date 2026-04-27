@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks
 
 from app.agents.context_builder import get_recent_messages, get_room_context
 from app.agents.llm_client import get_model_routing_status

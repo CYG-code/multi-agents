@@ -8,6 +8,7 @@ from abc import ABC
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy import update
 
 from app.agents.llm_client import stream_completion
@@ -16,6 +17,7 @@ from app.config import settings
 from app.db.redis_client import get_redis_client
 from app.db.session import AsyncSessionLocal
 from app.models.message import Message, MessageStatus, SenderType
+from app.models.user import User
 from app.services.message_service import MessageService
 
 
@@ -68,6 +70,16 @@ class BaseRoleAgent(ABC):
         )
         return formatted
 
+    @staticmethod
+    def _build_content_preview(content: str | None, limit: int = 120) -> str:
+        text = (content or "").strip()
+        text = " ".join(text.split())
+        if not text:
+            return ""
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}..."
+
     async def generate_and_push(
         self,
         room_id: str,
@@ -78,15 +90,47 @@ class BaseRoleAgent(ABC):
         task: dict | None = None,
     ) -> None:
         message_id = str(uuid.uuid4())
+        persisted_source_message_uuid = None
+        persisted_source_message_id: str | None = None
+        source_display_name_snapshot: str | None = None
+        source_content_preview_snapshot: str | None = None
 
         async with AsyncSessionLocal() as db:
+            parsed_source_message_id = None
+            if source_message_id:
+                try:
+                    parsed_source_message_id = uuid.UUID(str(source_message_id))
+                except Exception:
+                    parsed_source_message_id = None
+
+            if parsed_source_message_id:
+                source_result = await db.execute(
+                    select(Message, User.display_name)
+                    .outerjoin(User, Message.sender_id == User.id)
+                    .where(Message.id == parsed_source_message_id)
+                )
+                source_row = source_result.first()
+                if source_row:
+                    source_message = source_row.Message
+                    source_display_name_snapshot = source_row.display_name or (
+                        f"[{source_message.agent_role}]"
+                        if source_message.agent_role
+                        else "Student"
+                    )
+                    source_content_preview_snapshot = self._build_content_preview(source_message.content)
+                    persisted_source_message_uuid = source_message.id
+                    persisted_source_message_id = str(source_message.id)
+
             seq_num = await MessageService.get_next_seq_num(room_id)
             msg = Message(
                 id=message_id,
                 room_id=room_id,
                 seq_num=seq_num,
                 sender_type=SenderType.agent,
+                source_message_id=persisted_source_message_uuid,
                 agent_role=self.ROLE,
+                source_display_name_snapshot=source_display_name_snapshot,
+                source_content_preview_snapshot=source_content_preview_snapshot,
                 content="",
                 status=MessageStatus.streaming,
             )
@@ -99,7 +143,9 @@ class BaseRoleAgent(ABC):
                 "type": "agent:typing",
                 "agent_role": self.ROLE,
                 "is_typing": True,
-                "source_message_id": source_message_id,
+                "source_message_id": persisted_source_message_id,
+                "source_display_name_snapshot": source_display_name_snapshot,
+                "source_content_preview_snapshot": source_content_preview_snapshot,
                 "trigger_type": trigger_type,
             },
         )
@@ -126,7 +172,9 @@ class BaseRoleAgent(ABC):
                         "agent_role": self.ROLE,
                         "message_id": message_id,
                         "token": token,
-                        "source_message_id": source_message_id,
+                        "source_message_id": persisted_source_message_id,
+                        "source_display_name_snapshot": source_display_name_snapshot,
+                        "source_content_preview_snapshot": source_content_preview_snapshot,
                         "trigger_type": trigger_type,
                     },
                 )
@@ -169,7 +217,9 @@ class BaseRoleAgent(ABC):
                     "status": "ok" if success else "failed",
                     "content": full_content,
                     "created_at": datetime.now(timezone.utc).isoformat(),
-                    "source_message_id": source_message_id,
+                    "source_message_id": persisted_source_message_id,
+                    "source_display_name_snapshot": source_display_name_snapshot,
+                    "source_content_preview_snapshot": source_content_preview_snapshot,
                     "trigger_type": trigger_type,
                     "error": error_detail,
                 },
@@ -181,7 +231,9 @@ class BaseRoleAgent(ABC):
                     "type": "agent:typing",
                     "agent_role": self.ROLE,
                     "is_typing": False,
-                    "source_message_id": source_message_id,
+                    "source_message_id": persisted_source_message_id,
+                    "source_display_name_snapshot": source_display_name_snapshot,
+                    "source_content_preview_snapshot": source_content_preview_snapshot,
                     "trigger_type": trigger_type,
                 },
             )

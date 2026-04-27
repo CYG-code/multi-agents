@@ -1,5 +1,6 @@
 from typing import Optional
 from uuid import UUID
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -19,6 +20,7 @@ from app.schemas.room import (
     RoomTaskBindRequest,
     RoomUpdate,
     TaskScriptConfirmRequest,
+    TaskScriptLeaseRequest,
 )
 from app.services import room_service, task_script_service, task_service
 from app.services.message_service import MessageService
@@ -130,6 +132,37 @@ async def bind_room_task(
     return resp
 
 
+@router.post("/{room_id}/timer/start", response_model=RoomResponse, status_code=200)
+async def start_or_reset_room_timer(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_teacher),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+
+    room = await room_service.start_or_reset_room_timer(db, room)
+    count = await room_service.get_member_count(db, room.id)
+
+    try:
+        redis_client = get_redis_client()
+        await redis_client.sadd("active_rooms", str(room.id))
+        payload = {
+            "type": "room:timer_updated",
+            "room_id": str(room.id),
+            "timer_started_at": room.timer_started_at.isoformat() if room.timer_started_at else None,
+            "timer_deadline_at": room.timer_deadline_at.isoformat() if room.timer_deadline_at else None,
+        }
+        await redis_client.publish(f"room:{room.id}", json.dumps(payload, ensure_ascii=False))
+    except RuntimeError:
+        pass
+
+    resp = RoomResponse.model_validate(room)
+    resp.member_count = count
+    return resp
+
+
 @router.delete("/{room_id}", status_code=200)
 async def delete_room(
     room_id: UUID,
@@ -197,6 +230,66 @@ async def get_task_script_state(
     return task_script_service.get_task_script_state(task)
 
 
+@router.get("/{room_id}/task-script/lock", status_code=200)
+async def get_task_script_lock_state(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+    return await task_script_service.get_task_script_lock_state(str(room_id), current_user)
+
+
+@router.post("/{room_id}/task-script/lock/acquire", status_code=200)
+async def acquire_task_script_lock(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+    if current_user.role != UserRole.student:
+        raise HTTPException(status_code=403, detail="Only students can edit task script proposals")
+    return await task_script_service.acquire_task_script_lock(db, room, current_user)
+
+
+@router.post("/{room_id}/task-script/lock/renew", status_code=200)
+async def renew_task_script_lock(
+    room_id: UUID,
+    data: TaskScriptLeaseRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+    if current_user.role != UserRole.student:
+        raise HTTPException(status_code=403, detail="Only students can edit task script proposals")
+    return await task_script_service.renew_task_script_lock(str(room_id), current_user, data.lease_id)
+
+
+@router.post("/{room_id}/task-script/lock/release", status_code=200)
+async def release_task_script_lock(
+    room_id: UUID,
+    data: TaskScriptLeaseRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    await _ensure_room_member(db, room_id, current_user.id)
+    if current_user.role != UserRole.student:
+        raise HTTPException(status_code=403, detail="Only students can edit task script proposals")
+    return await task_script_service.release_task_script_lock(str(room_id), current_user, data.lease_id)
+
+
 @router.post("/{room_id}/task-script/proposals/facilitator", status_code=200)
 async def propose_task_script_by_facilitator(
     room_id: UUID,
@@ -225,4 +318,11 @@ async def confirm_task_script_proposal(
         raise HTTPException(status_code=403, detail="仅学生可确认流程提案")
 
     overrides = (data.model_dump(exclude_none=True) if data else {})
-    return await task_script_service.confirm_pending_proposal(db, room, current_user, overrides=overrides)
+    return await task_script_service.confirm_pending_proposal(
+        db,
+        room,
+        current_user,
+        overrides=overrides,
+        proposal_id=(data.proposal_id if data else None),
+        lease_id=(data.lease_id if data else None),
+    )

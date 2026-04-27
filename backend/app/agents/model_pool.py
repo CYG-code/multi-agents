@@ -1,4 +1,4 @@
-﻿MODEL_CANDIDATES = [
+MODEL_CANDIDATES = [
     "gpt-5.4-mini",
     "gpt-5.4-mini-2026-03-17",
     "gpt-5.1",

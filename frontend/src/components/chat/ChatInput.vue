@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="border-t border-gray-200 p-3 bg-white relative">
     <div class="mb-2 flex flex-wrap items-center gap-2" v-if="selectedMentions.length > 0">
       <span class="text-xs text-gray-500">已选智能体：</span>
