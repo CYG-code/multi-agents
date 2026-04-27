@@ -67,6 +67,20 @@ async def start_or_reset_room_timer(db: AsyncSession, room: Room, duration_minut
     now = datetime.now(timezone.utc)
     room.timer_started_at = now
     room.timer_deadline_at = now + timedelta(minutes=duration_minutes)
+    room.timer_stopped_at = None
+    await db.commit()
+    await db.refresh(room)
+    return room
+
+
+async def stop_room_timer(db: AsyncSession, room: Room) -> Room:
+    if not room.timer_started_at or not room.timer_deadline_at:
+        return room
+
+    if room.timer_stopped_at:
+        return room
+
+    room.timer_stopped_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(room)
     return room

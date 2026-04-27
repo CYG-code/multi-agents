@@ -153,6 +153,7 @@ async def start_or_reset_room_timer(
             "room_id": str(room.id),
             "timer_started_at": room.timer_started_at.isoformat() if room.timer_started_at else None,
             "timer_deadline_at": room.timer_deadline_at.isoformat() if room.timer_deadline_at else None,
+            "timer_stopped_at": room.timer_stopped_at.isoformat() if room.timer_stopped_at else None,
         }
         await redis_client.publish(f"room:{room.id}", json.dumps(payload, ensure_ascii=False))
     except RuntimeError:

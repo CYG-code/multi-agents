@@ -12,9 +12,10 @@ from app.agents.settings import get_agent_settings
 from app.db.redis_client import get_redis_client
 from app.models.room import Room
 from app.models.user import User
-from app.services import task_service
+from app.services import room_service, task_service
 
 LOCK_TTL_SECONDS = 120
+REQUIRED_STUDENT_CONFIRMATIONS = 3
 
 
 def _to_text(value) -> str:
@@ -104,6 +105,22 @@ async def _broadcast_task_script_updated(room_id: str, reason: str) -> None:
         await redis_client.publish(f"room:{room_id}", json.dumps(payload, ensure_ascii=False))
     except Exception:
         # State is already persisted; broadcast failure should not break core flow.
+        return
+
+
+async def _broadcast_room_timer_updated(room: Room) -> None:
+    try:
+        redis_client = get_redis_client()
+        payload = {
+            "type": "room:timer_updated",
+            "room_id": str(room.id),
+            "timer_started_at": room.timer_started_at.isoformat() if room.timer_started_at else None,
+            "timer_deadline_at": room.timer_deadline_at.isoformat() if room.timer_deadline_at else None,
+            "timer_stopped_at": room.timer_stopped_at.isoformat() if room.timer_stopped_at else None,
+        }
+        await redis_client.publish(f"room:{room.id}", json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        # Timer state has been persisted; broadcast is best-effort.
         return
 
 
@@ -240,6 +257,8 @@ async def propose_facilitator_update(db, room: Room, current_user: User) -> dict
         "current_status": generated["current_status"],
         "next_goal": generated["next_goal"],
         "change_reason": generated["change_reason"],
+        "required_confirmations": REQUIRED_STUDENT_CONFIRMATIONS,
+        "confirmations": [],
     }
     task.scripts = {
         "current_status": base["current_status"],
@@ -366,27 +385,35 @@ async def confirm_pending_proposal(
         raise HTTPException(status_code=400, detail="proposal_id is required")
     if str(proposal_id) != pending_id:
         raise HTTPException(status_code=409, detail="Proposal has changed, please refresh")
-    if not lease_id:
-        raise HTTPException(status_code=400, detail="lease_id is required")
-
     room_id = str(room.id)
     lock_data = await _get_lock_raw(room_id)
-    if not lock_data:
-        raise HTTPException(status_code=409, detail="Edit lock expired, please re-enter edit mode")
-    if str(lock_data.get("proposal_id")) != pending_id:
-        raise HTTPException(status_code=409, detail="Proposal lock mismatch, please refresh")
-    if str(lock_data.get("user_id")) != str(current_user.id):
-        raise HTTPException(status_code=409, detail="Proposal is being edited by another student")
-    if str(lock_data.get("lease_id")) != str(lease_id):
-        raise HTTPException(status_code=409, detail="Lease id mismatch")
+    lock_owned_by_current_user = False
+    if lock_data:
+        if str(lock_data.get("proposal_id")) != pending_id:
+            raise HTTPException(status_code=409, detail="Proposal lock mismatch, please refresh")
+        lock_owned_by_current_user = str(lock_data.get("user_id")) == str(current_user.id)
+        if lock_owned_by_current_user and str(lock_data.get("lease_id")) != str(lease_id or ""):
+            raise HTTPException(status_code=409, detail="Lease id mismatch")
 
     overrides = overrides or {}
-    final_current_status = _to_text(overrides.get("current_status"))
-    if not final_current_status:
-        final_current_status = _to_text(pending.get("current_status"))
-    final_next_goal = _to_text(overrides.get("next_goal"))
-    if not final_next_goal:
-        final_next_goal = _to_text(pending.get("next_goal"))
+    has_override_values = (
+        "current_status" in overrides
+        or "next_goal" in overrides
+        or "student_feedback" in overrides
+    )
+    if has_override_values and not lock_owned_by_current_user:
+        raise HTTPException(status_code=409, detail="Only the current editor can modify proposal content")
+
+    final_current_status = _to_text(pending.get("current_status"))
+    final_next_goal = _to_text(pending.get("next_goal"))
+    if lock_owned_by_current_user:
+        override_current_status = _to_text(overrides.get("current_status"))
+        override_next_goal = _to_text(overrides.get("next_goal"))
+        if override_current_status:
+            final_current_status = override_current_status
+        if override_next_goal:
+            final_next_goal = override_next_goal
+
     student_feedback = _to_text(overrides.get("student_feedback"))
 
     if not final_current_status or not final_next_goal:
@@ -397,20 +424,63 @@ async def confirm_pending_proposal(
     student_adjusted = final_current_status != original_current_status or final_next_goal != original_next_goal
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    confirmations = pending.get("confirmations")
+    if not isinstance(confirmations, list):
+        confirmations = []
+
+    if any(str(item.get("user_id")) == str(current_user.id) for item in confirmations if isinstance(item, dict)):
+        raise HTTPException(status_code=409, detail="You have already confirmed this proposal")
+
+    confirmations.append(
+        {
+            "user_id": str(current_user.id),
+            "display_name": current_user.display_name,
+            "confirmed_at": now_iso,
+            "student_feedback": student_feedback,
+        }
+    )
+
+    total_confirmations = len(confirmations)
+
+    if total_confirmations < REQUIRED_STUDENT_CONFIRMATIONS:
+        pending["current_status"] = final_current_status
+        pending["next_goal"] = final_next_goal
+        pending["confirmations"] = confirmations
+        pending["required_confirmations"] = REQUIRED_STUDENT_CONFIRMATIONS
+        pending["latest_confirmed_at"] = now_iso
+
+        task.scripts = {
+            "current_status": base["current_status"],
+            "next_goal": base["next_goal"],
+            "history": base["history"],
+            "pending_proposal": pending,
+        }
+        await db.commit()
+        await db.refresh(task)
+
+        if lock_owned_by_current_user:
+            try:
+                await release_task_script_lock(room_id, current_user, str(lease_id or ""))
+            except HTTPException:
+                pass
+        await _broadcast_task_script_updated(room_id, reason="proposal_confirmation_progress")
+        return get_task_script_state(task)
+
     new_history = list(base["history"])
     new_history.append(
         {
             "id": pending_id or str(uuid.uuid4()),
             "agent_role": pending.get("agent_role") or "facilitator",
             "confirmed_at": now_iso,
-            "confirmed_by": str(current_user.id),
+            "confirmed_by": [item.get("user_id") for item in confirmations if isinstance(item, dict)],
+            "confirmations": confirmations,
+            "required_confirmations": REQUIRED_STUDENT_CONFIRMATIONS,
             "current_status": final_current_status,
             "next_goal": final_next_goal,
             "change_reason": _to_text(pending.get("change_reason")),
             "facilitator_suggested_current_status": original_current_status,
             "facilitator_suggested_next_goal": original_next_goal,
             "student_adjusted": student_adjusted,
-            "student_feedback": student_feedback,
         }
     )
 
@@ -420,13 +490,17 @@ async def confirm_pending_proposal(
         "history": new_history[-100:],
         "pending_proposal": None,
     }
+
+    room = await room_service.stop_room_timer(db, room)
     await db.commit()
     await db.refresh(task)
 
     try:
-        await release_task_script_lock(room_id, current_user, lease_id)
+        if lock_owned_by_current_user:
+            await release_task_script_lock(room_id, current_user, str(lease_id or ""))
     except HTTPException:
         # Confirmation already succeeded; lock release conflict should not fail the main write.
         pass
+    await _broadcast_room_timer_updated(room)
     await _broadcast_task_script_updated(room_id, reason="proposal_confirmed")
     return get_task_script_state(task)

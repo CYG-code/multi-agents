@@ -61,6 +61,7 @@
         :has-edit-lock="roomStore.isTaskScriptLockMine"
         :acquiring-lock="roomStore.acquiringTaskScriptLock"
         :releasing-lock="roomStore.releasingTaskScriptLock"
+        :current-user-id="authStore.user?.id || ''"
         @request-proposal="requestFacilitatorProposal"
         @confirm-proposal="confirmTaskScriptProposal"
         @acquire-lock="acquireTaskScriptLock"
@@ -108,7 +109,9 @@ const timerDiffMs = computed(() => {
   if (!roomStore.timerStartedAt || !roomStore.timerDeadlineAt) return null
   const deadline = Date.parse(roomStore.timerDeadlineAt)
   if (Number.isNaN(deadline)) return null
-  return deadline - nowMs.value
+  const stoppedAt = roomStore.timerStoppedAt ? Date.parse(roomStore.timerStoppedAt) : NaN
+  const referenceNowMs = Number.isNaN(stoppedAt) ? nowMs.value : stoppedAt
+  return deadline - referenceNowMs
 })
 
 const timerDisplayText = computed(() => {
@@ -194,11 +197,13 @@ async function releaseTaskScriptLock() {
 
 async function confirmTaskScriptProposal(payload) {
   if (authStore.user?.role !== 'student') return
-  if (!roomStore.ownTaskScriptLeaseId) return
-  await roomStore.confirmTaskScriptProposal({
+  const requestPayload = {
     ...(payload || {}),
-    lease_id: roomStore.ownTaskScriptLeaseId,
-  })
+  }
+  if (roomStore.ownTaskScriptLeaseId) {
+    requestPayload.lease_id = roomStore.ownTaskScriptLeaseId
+  }
+  await roomStore.confirmTaskScriptProposal(requestPayload)
 }
 
 onMounted(loadRoomContext)

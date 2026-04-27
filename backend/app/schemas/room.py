@@ -43,5 +43,6 @@ class RoomResponse(BaseModel):
     member_count: int = 0
     timer_started_at: Optional[datetime] = None
     timer_deadline_at: Optional[datetime] = None
+    timer_stopped_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)

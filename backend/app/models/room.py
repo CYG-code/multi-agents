@@ -26,3 +26,4 @@ class Room(Base):
     ended_at = Column(DateTime(timezone=True), nullable=True)
     timer_started_at = Column(DateTime(timezone=True), nullable=True)
     timer_deadline_at = Column(DateTime(timezone=True), nullable=True)
+    timer_stopped_at = Column(DateTime(timezone=True), nullable=True)

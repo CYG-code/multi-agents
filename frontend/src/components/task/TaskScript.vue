@@ -1,18 +1,18 @@
 <template>
   <div class="flex h-full min-h-0 flex-col rounded-lg border border-gray-200 bg-white p-3 overflow-hidden">
     <div class="mb-3 flex items-center justify-between">
-      <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">任务流程</p>
+      <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">{{ TXT.title }}</p>
       <button
         type="button"
         class="rounded border border-indigo-200 px-2 py-1 text-xs text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
         :disabled="loading || requestingProposal || !taskId || !!pendingProposal"
         @click="$emit('request-proposal')"
       >
-        {{ requestingProposal ? '主持智能体生成中...' : '让主持智能体更新建议' }}
+        {{ requestingProposal ? TXT.requesting : TXT.requestButton }}
       </button>
     </div>
 
-    <div v-if="loading" class="flex flex-1 items-center justify-center text-sm text-gray-400">加载中...</div>
+    <div v-if="loading" class="flex flex-1 items-center justify-center text-sm text-gray-400">{{ TXT.loading }}</div>
     <div v-else class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
       <div v-if="error" class="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-600">
         {{ error }}
@@ -27,31 +27,32 @@
             :disabled="acquiringLock || !!(lockState?.locked && !lockState?.is_mine)"
             @click="$emit('acquire-lock')"
           >
-            {{ acquiringLock ? '重试中...' : '重试进入编辑' }}
+            {{ acquiringLock ? TXT.retryingAcquire : TXT.retryAcquire }}
           </button>
         </div>
       </div>
 
       <div class="rounded-md border border-gray-200 bg-gray-50 p-2">
-        <p class="mb-1 text-xs font-semibold text-gray-500">当前状态</p>
-        <p class="text-sm text-gray-700">{{ currentStatus || '暂无' }}</p>
+        <p class="mb-1 text-xs font-semibold text-gray-500">{{ TXT.currentStatus }}</p>
+        <p class="text-sm text-gray-700">{{ currentStatus || TXT.empty }}</p>
       </div>
 
       <div class="rounded-md border border-blue-200 bg-blue-50 p-2">
-        <p class="mb-1 text-xs font-semibold text-blue-600">下一步目标</p>
-        <p class="text-sm text-blue-800">{{ nextGoal || '暂无' }}</p>
+        <p class="mb-1 text-xs font-semibold text-blue-600">{{ TXT.nextGoal }}</p>
+        <p class="text-sm text-blue-800">{{ nextGoal || TXT.empty }}</p>
       </div>
 
       <div v-if="pendingProposal" class="rounded-md border border-amber-200 bg-amber-50 p-2">
-        <p class="mb-1 text-xs font-semibold text-amber-700">待确认变更（主持智能体）</p>
-        <p class="text-[11px] text-amber-700">学生编辑建议后再确认，且同一时刻仅允许一位学生编辑。</p>
+        <p class="mb-1 text-xs font-semibold text-amber-700">{{ TXT.pendingTitle }}</p>
+        <p class="text-[11px] text-amber-700">{{ TXT.pendingHint }}</p>
+        <p class="mt-1 text-[11px] text-amber-700">{{ TXT.progress }}: {{ confirmationProgressText }}</p>
 
         <div class="mt-2 rounded border border-amber-200 bg-white p-2 text-[11px] text-amber-800">
           <div v-if="lockState?.locked">
-            <span v-if="hasEditLock">你正在编辑该提案</span>
-            <span v-else>当前由 {{ lockState.owner_display_name || '其他同学' }} 编辑中</span>
+            <span v-if="hasEditLock">{{ TXT.lockMine }}</span>
+            <span v-else>{{ TXT.lockBy }} {{ lockState.owner_display_name || TXT.otherStudent }} {{ TXT.lockEditing }}</span>
           </div>
-          <div v-else>当前无人编辑</div>
+          <div v-else>{{ TXT.noLock }}</div>
         </div>
 
         <div class="mt-2 flex items-center gap-2">
@@ -62,7 +63,7 @@
             :disabled="acquiringLock || !!confirmingProposal || !!(lockState?.locked && !lockState?.is_mine)"
             @click="$emit('acquire-lock')"
           >
-            {{ acquiringLock ? '进入编辑中...' : '进入编辑' }}
+            {{ acquiringLock ? TXT.acquiring : TXT.enterEdit }}
           </button>
 
           <button
@@ -72,11 +73,11 @@
             :disabled="releasingLock || !!confirmingProposal"
             @click="$emit('release-lock')"
           >
-            {{ releasingLock ? '退出中...' : '退出编辑' }}
+            {{ releasingLock ? TXT.releasing : TXT.exitEdit }}
           </button>
         </div>
 
-        <label class="mt-2 block text-xs text-amber-800">状态建议（可调整）</label>
+        <label class="mt-2 block text-xs text-amber-800">{{ TXT.editStatus }}</label>
         <textarea
           v-model="editableCurrentStatus"
           :disabled="!canEdit"
@@ -84,7 +85,7 @@
           class="mt-1 w-full resize-y rounded border border-amber-200 bg-white p-1.5 text-xs text-gray-700 outline-none focus:border-amber-400 disabled:cursor-not-allowed disabled:bg-amber-100"
         />
 
-        <label class="mt-2 block text-xs text-amber-800">目标建议（可调整）</label>
+        <label class="mt-2 block text-xs text-amber-800">{{ TXT.editGoal }}</label>
         <textarea
           v-model="editableNextGoal"
           :disabled="!canEdit"
@@ -93,34 +94,32 @@
         />
 
         <p v-if="pendingProposal.change_reason" class="mt-1 text-xs text-amber-600">
-          调整理由：{{ pendingProposal.change_reason }}
+          {{ TXT.reason }}: {{ pendingProposal.change_reason }}
         </p>
 
-        <label class="mt-2 block text-xs text-amber-800">学生意见（可选）</label>
+        <label class="mt-2 block text-xs text-amber-800">{{ TXT.feedback }}</label>
         <textarea
           v-model="studentFeedback"
           :disabled="!canEdit"
           rows="2"
-          placeholder="例如：建议把目标拆成两步，先做数据收集。"
+          :placeholder="TXT.feedbackPlaceholder"
           class="mt-1 w-full resize-y rounded border border-amber-200 bg-white p-1.5 text-xs text-gray-700 outline-none focus:border-amber-400 disabled:cursor-not-allowed disabled:bg-amber-100"
         />
 
         <div class="mt-2 flex items-center justify-between gap-2">
-          <span class="text-[11px] text-amber-600">每次变更都需学生确认后才会生效</span>
+          <span class="text-[11px] text-amber-600">{{ TXT.multiSignHint }}</span>
           <button
             type="button"
             class="rounded border border-green-200 bg-white px-2 py-1 text-xs text-green-700 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="!canConfirmAction"
             @click="confirmProposal"
           >
-            {{ confirmingProposal ? '确认中...' : '确认并保存' }}
+            {{ confirmButtonText }}
           </button>
         </div>
 
-        <p v-if="!canConfirm" class="mt-1 text-[11px] text-amber-600">仅学生可确认此提案</p>
-        <p v-else-if="canConfirm && !hasEditLock" class="mt-1 text-[11px] text-amber-600">
-          请先进入编辑再修改与确认。
-        </p>
+        <p v-if="!canConfirm" class="mt-1 text-[11px] text-amber-600">{{ TXT.onlyStudent }}</p>
+        <p v-else-if="hasConfirmedCurrentProposal" class="mt-1 text-[11px] text-amber-600">{{ TXT.alreadyConfirmed }}</p>
       </div>
     </div>
   </div>
@@ -128,6 +127,41 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+
+const TXT = {
+  title: '\u4efb\u52a1\u6d41\u7a0b',
+  requestButton: '\u8ba9\u4e3b\u6301\u667a\u80fd\u4f53\u66f4\u65b0\u5efa\u8bae',
+  requesting: '\u4e3b\u6301\u667a\u80fd\u4f53\u751f\u6210\u4e2d...',
+  loading: '\u52a0\u8f7d\u4e2d...',
+  currentStatus: '\u5f53\u524d\u72b6\u6001',
+  nextGoal: '\u4e0b\u4e00\u6b65\u76ee\u6807',
+  empty: '\u6682\u65e0',
+  pendingTitle: '\u5f85\u786e\u8ba4\u53d8\u66f4\uff08\u4e3b\u6301\u667a\u80fd\u4f53\uff09',
+  pendingHint: '\u652f\u6301\u591a\u4eba\u786e\u8ba4\uff0c\u7d2f\u8ba1 3 \u4f4d\u5b66\u751f\u786e\u8ba4\u540e\u624d\u6b63\u5f0f\u751f\u6548\u3002',
+  progress: '\u591a\u7b7e\u786e\u8ba4\u8fdb\u5ea6',
+  lockMine: '\u4f60\u6b63\u5728\u7f16\u8f91\u8be5\u63d0\u6848',
+  lockBy: '\u5f53\u524d\u7531',
+  lockEditing: '\u7f16\u8f91\u4e2d',
+  otherStudent: '\u5176\u4ed6\u540c\u5b66',
+  noLock: '\u5f53\u524d\u65e0\u4eba\u7f16\u8f91',
+  retryAcquire: '\u91cd\u8bd5\u8fdb\u5165\u7f16\u8f91',
+  retryingAcquire: '\u91cd\u8bd5\u4e2d...',
+  enterEdit: '\u8fdb\u5165\u7f16\u8f91',
+  acquiring: '\u8fdb\u5165\u7f16\u8f91\u4e2d...',
+  exitEdit: '\u9000\u51fa\u7f16\u8f91',
+  releasing: '\u9000\u51fa\u4e2d...',
+  editStatus: '\u72b6\u6001\u5efa\u8bae\uff08\u53ef\u8c03\u6574\uff09',
+  editGoal: '\u76ee\u6807\u5efa\u8bae\uff08\u53ef\u8c03\u6574\uff09',
+  reason: '\u8c03\u6574\u7406\u7531',
+  feedback: '\u5b66\u751f\u610f\u89c1\uff08\u53ef\u9009\uff09',
+  feedbackPlaceholder: '\u4f8b\u5982\uff1a\u5efa\u8bae\u628a\u76ee\u6807\u62c6\u6210\u4e24\u6b65\uff0c\u5148\u505a\u6570\u636e\u6536\u96c6\u3002',
+  multiSignHint: '\u63d0\u4ea4\u9700\u8981 3 \u4f4d\u5b66\u751f\u786e\u8ba4\u624d\u751f\u6548\u3002',
+  onlyStudent: '\u4ec5\u5b66\u751f\u53ef\u786e\u8ba4\u6b64\u63d0\u6848',
+  alreadyConfirmed: '\u4f60\u5df2\u5b8c\u6210\u672c\u8f6e\u786e\u8ba4\uff0c\u8bf7\u7b49\u5f85\u5176\u4ed6\u540c\u5b66\u3002',
+  submit: '\u786e\u8ba4\u5e76\u63d0\u4ea4',
+  submitting: '\u63d0\u4ea4\u4e2d...',
+  confirmed: '\u4f60\u5df2\u786e\u8ba4',
+}
 
 const props = defineProps({
   state: { type: Object, default: null },
@@ -141,6 +175,7 @@ const props = defineProps({
   hasEditLock: { type: Boolean, default: false },
   acquiringLock: { type: Boolean, default: false },
   releasingLock: { type: Boolean, default: false },
+  currentUserId: { type: String, default: '' },
 })
 
 const emit = defineEmits(['request-proposal', 'confirm-proposal', 'acquire-lock', 'release-lock'])
@@ -150,6 +185,16 @@ const currentStatus = computed(() => props.state?.current_status || '')
 const nextGoal = computed(() => props.state?.next_goal || '')
 const pendingProposal = computed(() => props.state?.pending_proposal || null)
 const currentProposalId = computed(() => pendingProposal.value?.id || '')
+const proposalConfirmations = computed(() =>
+  Array.isArray(pendingProposal.value?.confirmations) ? pendingProposal.value.confirmations : []
+)
+const requiredConfirmations = computed(() => Number(pendingProposal.value?.required_confirmations || 3))
+const confirmationProgressText = computed(() => `${proposalConfirmations.value.length}/${requiredConfirmations.value}`)
+const hasConfirmedCurrentProposal = computed(() => {
+  const uid = String(props.currentUserId || '')
+  if (!uid) return false
+  return proposalConfirmations.value.some((item) => String(item?.user_id || '') === uid)
+})
 
 const editableCurrentStatus = ref('')
 const editableNextGoal = ref('')
@@ -161,9 +206,15 @@ const canEdit = computed(() => {
 })
 
 const canConfirmAction = computed(() => {
-  if (!props.canConfirm || !props.hasEditLock || props.confirmingProposal) return false
-  if (!editableCurrentStatus.value.trim() || !editableNextGoal.value.trim()) return false
+  if (!props.canConfirm || props.confirmingProposal || hasConfirmedCurrentProposal.value) return false
+  if (props.hasEditLock && (!editableCurrentStatus.value.trim() || !editableNextGoal.value.trim())) return false
   return true
+})
+
+const confirmButtonText = computed(() => {
+  if (props.confirmingProposal) return TXT.submitting
+  if (hasConfirmedCurrentProposal.value) return TXT.confirmed
+  return TXT.submit
 })
 
 const showRetryAcquire = computed(() => {
@@ -214,11 +265,14 @@ watch([editableCurrentStatus, editableNextGoal, studentFeedback], () => {
 })
 
 function confirmProposal() {
-  emit('confirm-proposal', {
-    current_status: editableCurrentStatus.value.trim(),
-    next_goal: editableNextGoal.value.trim(),
-    student_feedback: studentFeedback.value.trim() || null,
+  const payload = {
     proposal_id: pendingProposal.value?.id || null,
-  })
+  }
+  if (props.hasEditLock) {
+    payload.current_status = editableCurrentStatus.value.trim()
+    payload.next_goal = editableNextGoal.value.trim()
+    payload.student_feedback = studentFeedback.value.trim() || null
+  }
+  emit('confirm-proposal', payload)
 }
 </script>

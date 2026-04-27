@@ -29,6 +29,7 @@ export const useRoomStore = defineStore('room', {
     ownTaskScriptLeaseId: '',
     timerStartedAt: null,
     timerDeadlineAt: null,
+    timerStoppedAt: null,
     startingRoomTimer: false,
     roomTimerError: '',
   }),
@@ -43,6 +44,7 @@ export const useRoomStore = defineStore('room', {
     syncTimerFromRoom(room) {
       this.timerStartedAt = room?.timer_started_at || null
       this.timerDeadlineAt = room?.timer_deadline_at || null
+      this.timerStoppedAt = room?.timer_stopped_at || null
     },
 
     applyRoomTimerUpdate(payload = {}) {
@@ -51,11 +53,13 @@ export const useRoomStore = defineStore('room', {
 
       this.timerStartedAt = payload.timer_started_at || null
       this.timerDeadlineAt = payload.timer_deadline_at || null
+      this.timerStoppedAt = payload.timer_stopped_at || null
       if (this.currentRoom) {
         this.currentRoom = {
           ...this.currentRoom,
           timer_started_at: this.timerStartedAt,
           timer_deadline_at: this.timerDeadlineAt,
+          timer_stopped_at: this.timerStoppedAt,
         }
       }
     },

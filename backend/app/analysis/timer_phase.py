@@ -20,11 +20,20 @@ async def get_elapsed_seconds_from_timer_start(room_id: str) -> float | None:
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Room.timer_started_at).where(Room.id == parsed_room_id)
+            select(Room.timer_started_at, Room.timer_stopped_at).where(Room.id == parsed_room_id)
         )
-        timer_started_at = result.scalar_one_or_none()
+        row = result.first()
+
+    if row is None:
+        return None
+
+    timer_started_at = row.timer_started_at
+    timer_stopped_at = row.timer_stopped_at
 
     if timer_started_at is None:
+        return None
+    if timer_stopped_at is not None:
+        # Timer already stopped after student submission; disable time-based triggers.
         return None
 
     if timer_started_at.tzinfo is None:
