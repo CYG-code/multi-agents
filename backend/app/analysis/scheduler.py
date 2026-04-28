@@ -9,6 +9,15 @@ from sqlalchemy import select
 
 from app.agents.committee import basic_committee
 from app.agents.llm_client import refresh_model_routing
+from app.agents.agent_messages import (
+    SILENCE_REASON_TEMPLATE,
+    SILENCE_STRATEGY,
+    TIME_PROGRESS_PHASE_TEXT,
+    TIME_PROGRESS_PROGRESS_TEXT,
+    TIME_PROGRESS_REASON_TEMPLATE,
+    TIME_PROGRESS_STRATEGY_NORMAL,
+    TIME_PROGRESS_STRATEGY_SLOW,
+)
 from app.agents.queue import enqueue_task
 from app.agents.settings import get_agent_settings
 from app.analysis.timer_phase import get_elapsed_seconds_from_timer_start
@@ -46,7 +55,7 @@ def _is_meaningful_text(text: str) -> bool:
     normalized = (text or "").strip().lower()
     if not normalized:
         return False
-    return normalized not in {"none", "null", "n/a", "-", "无", "暂无", "暂无。", "暂时无"}
+    return normalized not in {"none", "null", "n/a", "-", "?", "??", "???"}
 
 
 def _phase_label(elapsed_minutes: int) -> str:
@@ -93,22 +102,18 @@ def _build_time_nudge_text(
     progress_status: str,
     progress_details: str,
 ) -> tuple[str, str]:
-    phase_text = {"early": "前期", "middle": "中期", "late": "后期"}.get(phase, "当前阶段")
-    progress_text = "进度正常" if progress_status == "normal" else "进度偏慢"
-    reason = (
-        f"时间节点提醒：已进行 {elapsed_minutes} 分钟（命中 {node_minutes} 分钟节点），"
-        f"当前处于{phase_text}，判断为{progress_text}。"
+    phase_text = TIME_PROGRESS_PHASE_TEXT.get(phase, "????")
+    progress_text = TIME_PROGRESS_PROGRESS_TEXT.get(progress_status, "??????")
+    reason = TIME_PROGRESS_REASON_TEMPLATE.format(
+        elapsed_minutes=elapsed_minutes,
+        node_minutes=node_minutes,
+        phase_text=phase_text,
+        progress_text=progress_text,
     )
     if progress_status == "slow":
-        strategy = (
-            f"请用 5-8 分钟明确分工并收敛：先确认当前状态，再确定下一步目标，最后指定每位同学的短任务。"
-            f"诊断信息：{progress_details}"
-        )
+        strategy = TIME_PROGRESS_STRATEGY_SLOW.format(progress_details=progress_details)
     else:
-        strategy = (
-            f"请继续保持节奏并做一次小结：确认当前状态是否清晰、下一步目标是否可执行，必要时提前安排收敛动作。"
-            f"诊断信息：{progress_details}"
-        )
+        strategy = TIME_PROGRESS_STRATEGY_NORMAL.format(progress_details=progress_details)
     return reason, strategy
 
 
@@ -159,6 +164,7 @@ async def check_silence() -> None:
     now = time.time()
     warmup_seconds = cfg.timing.warmup_minutes * 60
     lock_ttl = cfg.timing.silence_threshold_seconds + 60
+    rule_marker_ttl = max(30, int(getattr(cfg.timing, "rule_trigger_marker_ttl_seconds", 180)))
 
     for room_id in active_rooms:
         last_activity_time = await redis_client.get(f"room:{room_id}:last_activity_time")
@@ -184,6 +190,7 @@ async def check_silence() -> None:
             continue
 
         await redis_client.setex(lock_key, lock_ttl, "1")
+        await redis_client.setex(f"recent_rule_trigger:{room_id}:silence", rule_marker_ttl, "1")
         await enqueue_task(
             room_id,
             {
@@ -193,6 +200,9 @@ async def check_silence() -> None:
                 "strategy": "提出一个具体问题，邀请成员基于已有观点给出下一步分析。",
                 "priority": 2,
                 "trigger_type": "silence",
+                "target_dimension": "behavioral",
+                "evidence": [f"silence_seconds={int(silence)}"],
+                "current_phase": _phase_label(int(elapsed_seconds // 60)),
                 "triggered_at": now,
             },
         )
@@ -219,13 +229,14 @@ async def check_committee_timer() -> None:
 async def check_time_progress_reminders() -> None:
     cfg = get_agent_settings()
     auto_speak = getattr(cfg, "auto_speak", None)
-    facilitator_silence_enabled = True if auto_speak is None else getattr(auto_speak, "facilitator_silence_enabled", True)
-    if not facilitator_silence_enabled:
+    time_progress_enabled = True if auto_speak is None else getattr(auto_speak, "time_progress_enabled", True)
+    if not time_progress_enabled:
         return
 
     redis_client = get_redis_client()
     active_rooms = await redis_client.smembers("active_rooms")
     now = time.time()
+    rule_marker_ttl = max(30, int(getattr(cfg.timing, "rule_trigger_marker_ttl_seconds", 180)))
 
     for raw_room_id in active_rooms:
         room_id = _decode_room_id(raw_room_id)
@@ -283,6 +294,7 @@ async def check_time_progress_reminders() -> None:
         )
 
         await redis_client.setex(lock_key, TIME_NODE_LOCK_TTL_SECONDS, "1")
+        await redis_client.setex(f"recent_rule_trigger:{room_id}:time_progress", rule_marker_ttl, "1")
         await enqueue_task(
             room_id,
             {
@@ -292,8 +304,14 @@ async def check_time_progress_reminders() -> None:
                 "strategy": strategy,
                 "priority": 1,
                 "trigger_type": "time_progress",
+                "target_dimension": "behavioral",
+                "evidence": [
+                    f"elapsed_minutes={elapsed_minutes}",
+                    f"progress_status={progress_status}",
+                    f"node_minutes={matched_node}",
+                ],
                 "triggered_at": now,
-                "phase": phase,
+                "current_phase": phase,
                 "progress_status": progress_status,
                 "elapsed_minutes": elapsed_minutes,
                 "node_minutes": matched_node,

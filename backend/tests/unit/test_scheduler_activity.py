@@ -26,6 +26,7 @@ class _Timing:
     silence_trigger_enabled = True
     silence_threshold_seconds = 120
     warmup_minutes = 3
+    rule_trigger_marker_ttl_seconds = 180
 
 
 class _AutoSpeak:
@@ -96,3 +97,4 @@ async def test_check_silence_falls_back_to_last_msg_time(monkeypatch):
     assert len(enqueued) == 1
     assert enqueued[0][0] == room_id
     assert enqueued[0][1]["trigger_type"] == "silence"
+    assert await fake_redis.exists(f"recent_rule_trigger:{room_id}:silence")

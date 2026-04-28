@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -6,6 +6,7 @@ import time
 from uuid import UUID
 
 from app.agents.context_builder import get_recent_messages, get_room_context, get_room_members
+from app.agents.agent_messages import COMMITTEE_DEFAULT_REASON
 from app.agents.queue import enqueue_task
 from app.agents.settings import get_agent_settings
 from app.background_experts import (
@@ -42,6 +43,7 @@ class BasicCommittee:
         )
 
         context = await get_room_context(room_id)
+        recent_rule_triggers = await self._get_recent_rule_triggers(room_id)
         decision = self.dispatcher.dispatch(
             cognitive_report=cognitive,
             behavioral_report=behavioral,
@@ -49,6 +51,17 @@ class BasicCommittee:
             social_report=social,
             current_phase=context.get("current_phase") or "Unknown",
             recent_interventions=context.get("recent_interventions") or [],
+            recent_rule_triggers=recent_rule_triggers,
+            recent_same_role_window=max(
+                2,
+                int(
+                    getattr(
+                        getattr(get_agent_settings(), "auto_speak", None),
+                        "committee_recent_same_role_window",
+                        2,
+                    )
+                ),
+            ),
         )
 
         snapshot_id = await self._save_snapshot(
@@ -79,16 +92,30 @@ class BasicCommittee:
             {
                 "room_id": room_id,
                 "agent_role": decision.get("selected_agent_role"),
-                "reason": decision.get("reason", "专家委员会建议进行一次引导"),
+                "trigger_type": decision.get("trigger_type", "committee"),
+                "reason": decision.get("reason", COMMITTEE_DEFAULT_REASON),
                 "strategy": decision.get("strategy", ""),
                 "priority": int(decision.get("priority") or 1),
-                "trigger_type": "committee",
-                "triggered_at": time.time(),
                 "target_dimension": decision.get("target_dimension", "none"),
                 "evidence": decision.get("evidence") or [],
+                "current_phase": decision.get("current_phase", "unknown"),
+                "source_message_id": None,
+                "triggered_at": time.time(),
                 "snapshot_id": snapshot_id,
+                "intervention_id": None,
             },
         )
+
+    async def _get_recent_rule_triggers(self, room_id: str) -> dict:
+        try:
+            redis_client = get_redis_client()
+            return {
+                "silence": bool(await redis_client.exists(f"recent_rule_trigger:{room_id}:silence")),
+                "time_progress": bool(await redis_client.exists(f"recent_rule_trigger:{room_id}:time_progress")),
+                "monopoly": bool(await redis_client.exists(f"recent_rule_trigger:{room_id}:monopoly")),
+            }
+        except Exception:
+            return {"silence": False, "time_progress": False, "monopoly": False}
 
     async def _save_snapshot(
         self,

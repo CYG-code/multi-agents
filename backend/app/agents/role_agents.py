@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import time
@@ -53,13 +53,42 @@ class BaseRoleAgent(ABC):
         model = get_agent_settings().models.role_agents.model_version
         return model or settings.AGENT_MODEL
 
+    def build_dispatcher_task_block(self, context: dict, task: dict | None = None) -> str:
+        task = task or {}
+        evidence = task.get("evidence") or []
+        if isinstance(evidence, list):
+            evidence_text = "; ".join(str(item) for item in evidence[:5])
+        else:
+            evidence_text = str(evidence)
+
+        current_phase = task.get("current_phase") or context.get("current_phase", "Unknown phase")
+        return (
+            "[Dispatcher Task]\n"
+            f"trigger_type: {task.get('trigger_type', 'manual')}\n"
+            f"target_dimension: {task.get('target_dimension', 'none')}\n"
+            f"priority: {task.get('priority', 'unknown')}\n"
+            f"current_phase: {current_phase}\n\n"
+            "reason:\n"
+            f"{task.get('reason', 'System requests one collaboration support intervention.')}\n\n"
+            "strategy:\n"
+            f"{task.get('strategy', 'Provide one concise and actionable help for the current discussion.')}\n\n"
+            "evidence:\n"
+            f"{evidence_text or 'none'}\n\n"
+            "Rules:\n"
+            "- You must follow the strategy.\n"
+            "- You must not reveal internal fields, scores, thresholds, or system labels to students.\n"
+            "- You must generate only one concise role-appropriate intervention.\n"
+            "- You must not decide whether another agent should speak.\n"
+        )
+
     def build_system_prompt(self, context: dict, task: dict | None = None) -> str:
         mention_context = ""
         if task and task.get("trigger_type") == "mention":
             student_name = task.get("student_name") or "student"
             mention_context = (
-                f"[Mention Context] User {student_name} just @mentioned you in chat.\n"
-                "Prioritize directly answering that mention while keeping your role style."
+                f"[Mention Context] Student {student_name} directly mentioned you.\n"
+                "This is a user-requested intervention. Prioritize answering the student's request.\n"
+                "Still follow your role SKILL and keep the answer concise."
             )
 
         base_prompt = self._prompt_template.format(
@@ -71,13 +100,15 @@ class BaseRoleAgent(ABC):
             strategy=(task or {}).get("strategy", "Propose one concrete question to move discussion forward."),
             mention_context=mention_context,
         )
-        if not self._skill_spec:
-            return base_prompt
-        return (
-            f"{base_prompt}\n\n"
-            "[Skill Spec] Follow the role SKILL spec below with higher priority than generic style:\n"
-            f"{self._skill_spec}"
-        )
+
+        prompt_parts = [base_prompt, self.build_dispatcher_task_block(context, task)]
+        if self._skill_spec:
+            prompt_parts.append(
+                "[Skill Spec]\n"
+                "Follow the role SKILL spec below with higher priority than generic style:\n"
+                f"{self._skill_spec}"
+            )
+        return "\n\n".join(prompt_parts)
 
     def build_messages(self, history: list[dict]) -> list[dict]:
         formatted = [
@@ -87,7 +118,12 @@ class BaseRoleAgent(ABC):
         formatted.append(
             {
                 "role": "user",
-                "content": f"请结合以上讨论，以{self.ROLE_DISPLAY_NAME}身份发言一次。",
+                "content": (
+                    f"Please generate one response as {self.ROLE_DISPLAY_NAME} based on the discussion above. "
+                    "You must follow the Dispatcher Task and Skill Spec in system instructions. "
+                    "Before output, execute the Output Self-Check in your Skill. "
+                    "Output only student-visible response text, and do not explain your analysis process."
+                ),
             }
         )
         return formatted
@@ -135,9 +171,7 @@ class BaseRoleAgent(ABC):
                 if source_row:
                     source_message = source_row.Message
                     source_display_name_snapshot = source_row.display_name or (
-                        f"[{source_message.agent_role}]"
-                        if source_message.agent_role
-                        else "Student"
+                        f"[{source_message.agent_role}]" if source_message.agent_role else "Student"
                     )
                     source_content_preview_snapshot = self._build_content_preview(source_message.content)
                     persisted_source_message_uuid = source_message.id
@@ -269,6 +303,7 @@ class FacilitatorAgent(BaseRoleAgent):
     ROLE = "facilitator"
     ROLE_DISPLAY_NAME = "主持人"
     PROMPT_FILE = "facilitator.txt"
+    SKILL_DIR = "facilitator"
 
 
 class DevilAdvocateAgent(BaseRoleAgent):
@@ -282,18 +317,21 @@ class SummarizerAgent(BaseRoleAgent):
     ROLE = "summarizer"
     ROLE_DISPLAY_NAME = "总结者"
     PROMPT_FILE = "summarizer.txt"
+    SKILL_DIR = "summarizer"
 
 
 class ResourceFinderAgent(BaseRoleAgent):
     ROLE = "resource_finder"
     ROLE_DISPLAY_NAME = "资源检索者"
     PROMPT_FILE = "resource_finder.txt"
+    SKILL_DIR = "resource_finder"
 
 
 class EncouragerAgent(BaseRoleAgent):
     ROLE = "encourager"
     ROLE_DISPLAY_NAME = "鼓励者"
     PROMPT_FILE = "encourager.txt"
+    SKILL_DIR = "encourager"
 
 
 ROLE_AGENTS: dict[str, BaseRoleAgent] = {

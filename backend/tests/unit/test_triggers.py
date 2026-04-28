@@ -43,12 +43,25 @@ async def test_check_monopoly_enqueues_once(monkeypatch):
     class _Thresholds:
         monopoly_message_count = 3
 
+    class _Timing:
+        warmup_minutes = 0
+        rule_trigger_marker_ttl_seconds = 180
+
+    class _AutoSpeak:
+        monopoly_encourager_enabled = True
+
     class _Cfg:
         thresholds = _Thresholds()
+        timing = _Timing()
+        auto_speak = _AutoSpeak()
+
+    async def _fake_elapsed(_room_id):
+        return 1000.0
 
     monkeypatch.setattr(triggers, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(triggers, "enqueue_task", _fake_enqueue)
     monkeypatch.setattr(triggers, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(triggers, "get_elapsed_seconds_from_timer_start", _fake_elapsed)
 
     detector = triggers.TriggerDetector()
     await detector.check_monopoly("room-1", "u1")
@@ -58,3 +71,4 @@ async def test_check_monopoly_enqueues_once(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][1]["agent_role"] == "encourager"
+    assert await fake_redis.exists("recent_rule_trigger:room-1:monopoly")

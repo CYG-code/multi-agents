@@ -13,5 +13,5 @@ def test_writing_area_reports_activity_with_12s_throttle():
     assert "reportWritingActivity()" in content
     handle_input_section = content.split("function handleInput()", 1)[1].split("function focusEditor()", 1)[0]
     assert "reportWritingActivity()" in handle_input_section
-    submit_section = content.split("function submitAnswer()", 1)[1].split("watch(storageKey", 1)[0]
-    assert "reportWritingActivity()" in submit_section
+    confirm_section = content.split("async function confirmSubmit()", 1)[1].split("async function initWritingDoc()", 1)[0]
+    assert "reportWritingActivity()" in confirm_section

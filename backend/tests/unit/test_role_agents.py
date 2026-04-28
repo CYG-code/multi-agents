@@ -176,4 +176,4 @@ def test_devil_advocate_includes_skill_spec_in_system_prompt():
     )
 
     assert "[Skill Spec]" in prompt
-    assert "devils-advocate" in prompt
+    assert "devil-advocate-skill" in prompt

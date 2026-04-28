@@ -4,7 +4,9 @@ timing:
   analysis_interval_minutes: 5
   warmup_minutes: 3
   agent_cooldown_seconds: 60
-  global_intervention_limit_per_hour: 12
+  global_intervention_limit_per_hour: 6
+  room_auto_intervention_cooldown_seconds: 180
+  rule_trigger_marker_ttl_seconds: 180
 
 thresholds:
   diversity_score_threshold: 0.3
@@ -38,7 +40,9 @@ mention:
 
 auto_speak:
   facilitator_silence_enabled: false
+  time_progress_enabled: false
   committee_enabled: false
+  committee_recent_same_role_window: 2
   monopoly_encourager_enabled: false
   committee_devil_advocate_enabled: false
   committee_summarizer_enabled: false

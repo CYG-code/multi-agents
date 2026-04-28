@@ -19,6 +19,8 @@ class TimingConfig(BaseModel):
     warmup_minutes: int = 3
     agent_cooldown_seconds: int = 60
     global_intervention_limit_per_hour: int = 12
+    room_auto_intervention_cooldown_seconds: int = 180
+    rule_trigger_marker_ttl_seconds: int = 180
 
 
 class ThresholdsConfig(BaseModel):
@@ -35,7 +37,9 @@ class MentionConfig(BaseModel):
 
 class AutoSpeakConfig(BaseModel):
     facilitator_silence_enabled: bool = True
+    time_progress_enabled: bool = True
     committee_enabled: bool = True
+    committee_recent_same_role_window: int = 2
     monopoly_encourager_enabled: bool = True
     committee_devil_advocate_enabled: bool = True
     committee_summarizer_enabled: bool = True

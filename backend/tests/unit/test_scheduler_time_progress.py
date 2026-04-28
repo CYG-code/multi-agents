@@ -26,10 +26,25 @@ class _FakeRedis:
 
 class _AutoSpeak:
     facilitator_silence_enabled = True
+    time_progress_enabled = True
+
+
+class _Timing:
+    rule_trigger_marker_ttl_seconds = 180
 
 
 class _Cfg:
     auto_speak = _AutoSpeak()
+    timing = _Timing()
+
+
+class _CfgTimeProgressOff:
+    class _Auto:
+        facilitator_silence_enabled = True
+        time_progress_enabled = False
+
+    auto_speak = _Auto()
+    timing = _Timing()
 
 
 @pytest.mark.asyncio
@@ -79,6 +94,7 @@ async def test_time_progress_reminder_triggers_once_per_node(monkeypatch):
     assert enqueued[0][1]["trigger_type"] == "time_progress"
     assert enqueued[0][1]["node_minutes"] == 35
     assert enqueued[0][1]["progress_status"] == "normal"
+    assert await fake_redis.exists(f"recent_rule_trigger:{room_id}:time_progress")
 
 
 @pytest.mark.asyncio
@@ -125,6 +141,26 @@ async def test_time_progress_reminder_marks_late_phase_slow(monkeypatch):
     assert len(enqueued) == 1
     payload = enqueued[0][1]
     assert payload["node_minutes"] == 75
-    assert payload["phase"] == "late"
+    assert payload["current_phase"] == "late"
     assert payload["progress_status"] == "slow"
 
+
+@pytest.mark.asyncio
+async def test_time_progress_respects_dedicated_toggle(monkeypatch):
+    room_id = "room-3"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={})
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_elapsed(_room_id):
+        return 40 * 60.0
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _CfgTimeProgressOff())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "get_elapsed_seconds_from_timer_start", _fake_elapsed)
+
+    await scheduler.check_time_progress_reminders()
+    assert enqueued == []

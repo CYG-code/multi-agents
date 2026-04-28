@@ -10,6 +10,13 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.agent_messages import (
+    MENTION_ACCEPTED,
+    MENTION_QUEUED,
+    MENTION_REASON_TEMPLATE,
+    MENTION_STRATEGY,
+    MENTION_UNSUPPORTED,
+)
 from app.agents.queue import enqueue_task
 from app.agents.role_agents import ROLE_AGENTS
 from app.agents.settings import get_agent_settings
@@ -115,6 +122,9 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
                 "strategy": "优先回应该同学的提问，并给出可继续讨论的下一步。",
                 "priority": cfg.mention.priority,
                 "trigger_type": "mention",
+                "target_dimension": "user_request",
+                "evidence": [],
+                "current_phase": "unknown",
                 "student_name": user.display_name,
                 "source_message_id": source_message_id,
                 "triggered_at": time.time(),

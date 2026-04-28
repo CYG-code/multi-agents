@@ -8,6 +8,7 @@ from app.agents.context_builder import get_recent_messages, get_room_context
 from app.agents.queue import dequeue_tasks, requeue_task
 from app.agents.role_agents import ROLE_AGENTS
 from app.agents.settings import get_agent_settings
+from app.agents.trigger_policy import is_user_trigger
 from app.db.redis_client import get_redis_client
 
 WORKER_ID = str(uuid.uuid4())
@@ -55,6 +56,9 @@ class AgentWorker:
             return
 
         redis_client = get_redis_client()
+        trigger_type = (task.get("trigger_type") or "").strip().lower()
+        is_auto_trigger = not is_user_trigger(trigger_type)
+        room_auto_cooldown_key = f"cooldown:{room_id}:auto_intervention"
 
         hourly_key = f"interventions:{room_id}:{int(time.time() // 3600)}"
         hourly_count = await redis_client.get(hourly_key)
@@ -62,9 +66,22 @@ class AgentWorker:
             print(f"[AgentWorker] room={room_id} hit hourly limit, drop task {task.get('task_id')}")
             return
 
+        if is_auto_trigger and await redis_client.exists(room_auto_cooldown_key):
+            print(
+                f"[AgentWorker] drop auto task due to room cooldown "
+                f"room={room_id} trigger={trigger_type} role={agent_role}"
+            )
+            return
+
         cooldown_key = f"cooldown:{room_id}:{agent_role}"
         if await redis_client.exists(cooldown_key):
-            await requeue_task(room_id, task, delay_seconds=10)
+            if is_user_trigger(trigger_type):
+                await requeue_task(room_id, task, delay_seconds=10)
+            else:
+                print(
+                    f"[AgentWorker] drop auto task due to role cooldown "
+                    f"room={room_id} role={agent_role} trigger={trigger_type}"
+                )
             return
 
         lock_key = f"room:{room_id}:agent_lock"
@@ -87,6 +104,12 @@ class AgentWorker:
             )
 
             await redis_client.setex(cooldown_key, cfg.timing.agent_cooldown_seconds, "1")
+            if is_auto_trigger:
+                await redis_client.setex(
+                    room_auto_cooldown_key,
+                    int(getattr(cfg.timing, "room_auto_intervention_cooldown_seconds", 180)),
+                    "1",
+                )
             current_count = await redis_client.incr(hourly_key)
             if current_count == 1:
                 await redis_client.expire(hourly_key, 3600)
