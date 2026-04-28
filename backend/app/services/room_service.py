@@ -42,6 +42,21 @@ async def join_room(db: AsyncSession, room_id: UUID, user_id: UUID) -> None:
     await db.commit()
 
 
+async def leave_room(db: AsyncSession, room_id: UUID, user_id: UUID) -> None:
+    await db.execute(
+        delete(RoomMember).where(
+            RoomMember.room_id == room_id,
+            RoomMember.user_id == user_id,
+        )
+    )
+    await db.commit()
+
+
+async def get_member_ids(db: AsyncSession, room_id: UUID) -> list[str]:
+    result = await db.execute(select(RoomMember.user_id).where(RoomMember.room_id == room_id))
+    return [str(row.user_id) for row in result.fetchall()]
+
+
 async def get_member_count(db: AsyncSession, room_id: UUID) -> int:
     result = await db.execute(
         select(func.count()).where(RoomMember.room_id == room_id)
@@ -65,9 +80,11 @@ async def bind_room_task(db: AsyncSession, room: Room, task_id: UUID) -> Room:
 
 async def start_room_timer(db: AsyncSession, room: Room, duration_minutes: int = 90) -> Room:
     now = datetime.now(timezone.utc)
+    locked_member_ids = await get_member_ids(db, room.id)
     room.timer_started_at = now
     room.timer_deadline_at = now + timedelta(minutes=duration_minutes)
     room.timer_stopped_at = None
+    room.locked_member_ids = locked_member_ids
     await db.commit()
     await db.refresh(room)
     return room
@@ -77,6 +94,7 @@ async def reset_room_timer(db: AsyncSession, room: Room) -> Room:
     room.timer_started_at = None
     room.timer_deadline_at = None
     room.timer_stopped_at = None
+    room.locked_member_ids = None
     await db.commit()
     await db.refresh(room)
     return room

@@ -25,6 +25,7 @@ class BaseRoleAgent(ABC):
     ROLE: str = "agent"
     ROLE_DISPLAY_NAME: str = "Agent"
     PROMPT_FILE: str = ""
+    SKILL_DIR: str | None = None
     MAX_TOKENS: int = 512
 
     def __init__(self):
@@ -32,6 +33,20 @@ class BaseRoleAgent(ABC):
             raise ValueError(f"{self.__class__.__name__} must define PROMPT_FILE.")
         prompt_path = Path(__file__).parent / "prompts" / self.PROMPT_FILE
         self._prompt_template = prompt_path.read_text(encoding="utf-8")
+        self._skill_spec = self._load_skill_spec()
+
+    def _load_skill_spec(self) -> str:
+        if not self.SKILL_DIR:
+            return ""
+        skill_path = Path(__file__).parent / "skills" / self.SKILL_DIR / "SKILL.md"
+        try:
+            return skill_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            print(f"[{self.__class__.__name__}] skill file not found: {skill_path}")
+            return ""
+        except Exception as exc:
+            print(f"[{self.__class__.__name__}] failed to read skill file: {exc}")
+            return ""
 
     @property
     def model(self) -> str:
@@ -41,20 +56,27 @@ class BaseRoleAgent(ABC):
     def build_system_prompt(self, context: dict, task: dict | None = None) -> str:
         mention_context = ""
         if task and task.get("trigger_type") == "mention":
-            student_name = task.get("student_name") or "某位同学"
+            student_name = task.get("student_name") or "student"
             mention_context = (
-                f"【附加上下文】用户 {student_name} 刚刚在聊天里 @ 了你。\n"
-                "请优先直接回应这次召唤，并保持你的角色风格。"
+                f"[Mention Context] User {student_name} just @mentioned you in chat.\n"
+                "Prioritize directly answering that mention while keeping your role style."
             )
 
-        return self._prompt_template.format(
-            task_description=context.get("task_description", "围绕当前学习任务展开讨论"),
-            task_workflow=context.get("task_workflow", "未提供任务流程"),
-            members_info=context.get("members_info", "暂无成员信息"),
-            current_phase=context.get("current_phase", "阶段未知"),
-            intervention_reason=(task or {}).get("reason", "请在当前讨论中给出一次有帮助的发言"),
-            strategy=(task or {}).get("strategy", "提出一个可继续讨论的问题"),
+        base_prompt = self._prompt_template.format(
+            task_description=context.get("task_description", "Discuss around the current learning task."),
+            task_workflow=context.get("task_workflow", "Task workflow is not provided."),
+            members_info=context.get("members_info", "No member information."),
+            current_phase=context.get("current_phase", "Unknown phase"),
+            intervention_reason=(task or {}).get("reason", "Provide one helpful intervention in the current discussion."),
+            strategy=(task or {}).get("strategy", "Propose one concrete question to move discussion forward."),
             mention_context=mention_context,
+        )
+        if not self._skill_spec:
+            return base_prompt
+        return (
+            f"{base_prompt}\n\n"
+            "[Skill Spec] Follow the role SKILL spec below with higher priority than generic style:\n"
+            f"{self._skill_spec}"
         )
 
     def build_messages(self, history: list[dict]) -> list[dict]:
@@ -253,6 +275,7 @@ class DevilAdvocateAgent(BaseRoleAgent):
     ROLE = "devil_advocate"
     ROLE_DISPLAY_NAME = "批判者"
     PROMPT_FILE = "devil_advocate.txt"
+    SKILL_DIR = "devil_advocate"
 
 
 class SummarizerAgent(BaseRoleAgent):

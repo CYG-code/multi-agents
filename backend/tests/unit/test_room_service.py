@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,12 +53,21 @@ async def test_delete_room_commits(fake_db):
 @pytest.mark.asyncio
 async def test_start_room_timer_sets_timer_fields(fake_db):
     room = Room(name="timer", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+    room.id = uuid.uuid4()
+    fake_db.execute_result = FakeExecuteResult(
+        scalar_list=[
+            SimpleNamespace(user_id=uuid.uuid4()),
+            SimpleNamespace(user_id=uuid.uuid4()),
+        ]
+    )
 
     updated = await room_service.start_room_timer(fake_db, room, duration_minutes=90)
 
     assert updated.timer_started_at is not None
     assert updated.timer_deadline_at is not None
     assert updated.timer_stopped_at is None
+    assert isinstance(updated.locked_member_ids, list)
+    assert len(updated.locked_member_ids) == 2
     delta = updated.timer_deadline_at - updated.timer_started_at
     assert int(delta.total_seconds()) == 90 * 60
     assert updated.timer_started_at.tzinfo == timezone.utc
@@ -71,11 +81,13 @@ async def test_reset_room_timer_clears_timer_fields(fake_db):
     room.timer_started_at = datetime.now(timezone.utc)
     room.timer_deadline_at = room.timer_started_at
     room.timer_stopped_at = room.timer_started_at
+    room.locked_member_ids = [str(uuid.uuid4())]
 
     updated = await room_service.reset_room_timer(fake_db, room)
 
     assert updated.timer_started_at is None
     assert updated.timer_deadline_at is None
     assert updated.timer_stopped_at is None
+    assert updated.locked_member_ids is None
     assert fake_db.commits == 1
     assert fake_db.refreshes == 1

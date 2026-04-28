@@ -166,3 +166,14 @@ async def test_generate_and_push_db_update_failure_marks_failed(monkeypatch):
     stream_end = [e for e in events if e["type"] == "agent:stream_end"][-1]
     assert stream_end["status"] == "failed"
     assert "DB update failed" in (stream_end["error"] or "")
+
+
+def test_devil_advocate_includes_skill_spec_in_system_prompt():
+    agent = role_agents.DevilAdvocateAgent()
+    prompt = agent.build_system_prompt(
+        context={"task_description": "T", "task_workflow": "W", "members_info": "M", "current_phase": "P"},
+        task={"reason": "R", "strategy": "S"},
+    )
+
+    assert "[Skill Spec]" in prompt
+    assert "devils-advocate" in prompt

@@ -12,13 +12,16 @@ thresholds:
   monopoly_message_count: 5
 
 models:
-  cognitive_analyst:
+  cognitive_engagement_analyst:
     model_version: "claude-3-5-haiku-20241022"
     history_token_budget: 8000
-  emotional_analyst:
+  behavioral_engagement_analyst:
     model_version: "claude-3-5-haiku-20241022"
     history_token_budget: 8000
-  interaction_analyst:
+  emotional_engagement_analyst:
+    model_version: "claude-3-5-haiku-20241022"
+    history_token_budget: 8000
+  social_engagement_analyst:
     model_version: "claude-3-5-haiku-20241022"
     history_token_budget: 8000
   chief_dispatcher:

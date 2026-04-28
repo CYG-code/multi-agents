@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from collections import Counter
+from uuid import UUID
 
-from app.agents.context_builder import get_recent_messages, get_room_members
+from app.agents.context_builder import get_recent_messages, get_room_context, get_room_members
 from app.agents.queue import enqueue_task
 from app.agents.settings import get_agent_settings
+from app.background_experts import (
+    BehavioralEngagementAnalyst,
+    ChiefDispatcher,
+    CognitiveEngagementAnalyst,
+    EmotionalEngagementAnalyst,
+    SocialCPSAnalyst,
+)
+from app.db.redis_client import get_redis_client
+from app.db.session import AsyncSessionLocal
+from app.models.analysis import AnalysisSnapshot
 
 
 class BasicCommittee:
-    """
-    P4 baseline committee.
-    Uses lightweight heuristics to produce dispatch tasks and validate full scheduling flow.
-    """
+    def __init__(self):
+        self.cognitive_analyst = CognitiveEngagementAnalyst()
+        self.behavioral_analyst = BehavioralEngagementAnalyst()
+        self.emotional_analyst = EmotionalEngagementAnalyst()
+        self.social_analyst = SocialCPSAnalyst()
+        self.dispatcher = ChiefDispatcher()
 
     async def analyze_and_dispatch(self, room_id: str) -> None:
         messages = await get_recent_messages(room_id, limit=50)
@@ -21,115 +34,149 @@ class BasicCommittee:
         if not messages:
             return
 
-        cognitive, emotional, interaction = await asyncio.gather(
-            self._cognitive_analysis(messages),
-            self._emotional_analysis(messages),
-            self._interaction_analysis(messages, members),
+        cognitive, behavioral, emotional, social = await asyncio.gather(
+            self.cognitive_analyst.analyze(messages, members),
+            self.behavioral_analyst.analyze(messages, members),
+            self.emotional_analyst.analyze(messages, members),
+            self.social_analyst.analyze(messages, members),
         )
 
-        interventions = self._dispatch(cognitive, emotional, interaction)
-        for intervention in interventions:
-            await enqueue_task(
-                room_id,
-                {
-                    "room_id": room_id,
-                    "agent_role": intervention["role"],
-                    "reason": intervention["reason"],
-                    "strategy": intervention.get("strategy", ""),
-                    "priority": intervention["priority"],
-                    "trigger_type": "committee",
-                    "triggered_at": time.time(),
-                },
-            )
+        context = await get_room_context(room_id)
+        decision = self.dispatcher.dispatch(
+            cognitive_report=cognitive,
+            behavioral_report=behavioral,
+            emotional_report=emotional,
+            social_report=social,
+            current_phase=context.get("current_phase") or "Unknown",
+            recent_interventions=context.get("recent_interventions") or [],
+        )
 
-    async def _cognitive_analysis(self, messages: list[dict]) -> dict:
-        unique_senders = len(set(m.get("sender_id") for m in messages if m.get("sender_id")))
-        total = len(messages)
-        diversity_score = min(unique_senders / max(total * 0.3, 1), 1.0)
-        progress_score = min(total / 20, 1.0)
-        return {"diversity_score": diversity_score, "progress_score": progress_score}
+        snapshot_id = await self._save_snapshot(
+            room_id=room_id,
+            analyzed_message_count=len(messages),
+            context=context,
+            cognitive=cognitive,
+            behavioral=behavioral,
+            emotional=emotional,
+            social=social,
+            decision=decision,
+        )
+        await self._publish_analysis_update(
+            room_id=room_id,
+            snapshot_id=snapshot_id,
+            cognitive=cognitive,
+            behavioral=behavioral,
+            emotional=emotional,
+            social=social,
+            decision=decision,
+        )
 
-    async def _emotional_analysis(self, messages: list[dict]) -> dict:
-        negative_keywords = ["算了", "没意思", "随便", "无聊", "放弃"]
-        conflict_keywords = ["你不对", "你错了", "不可能", "怎么可以"]
-        text = " ".join((m.get("content") or "") for m in messages[-10:])
-        return {
-            "emotion_flags": {
-                "passive": any(kw in text for kw in negative_keywords),
-                "conflict": any(kw in text for kw in conflict_keywords),
-                "anxious": False,
+        if not decision.get("should_intervene"):
+            return
+
+        await enqueue_task(
+            room_id,
+            {
+                "room_id": room_id,
+                "agent_role": decision.get("selected_agent_role"),
+                "reason": decision.get("reason", "专家委员会建议进行一次引导"),
+                "strategy": decision.get("strategy", ""),
+                "priority": int(decision.get("priority") or 1),
+                "trigger_type": "committee",
+                "triggered_at": time.time(),
+                "target_dimension": decision.get("target_dimension", "none"),
+                "evidence": decision.get("evidence") or [],
+                "snapshot_id": snapshot_id,
+            },
+        )
+
+    async def _save_snapshot(
+        self,
+        *,
+        room_id: str,
+        analyzed_message_count: int,
+        context: dict,
+        cognitive: dict,
+        behavioral: dict,
+        emotional: dict,
+        social: dict,
+        decision: dict,
+    ) -> str | None:
+        try:
+            parsed_room_id = UUID(str(room_id))
+        except (TypeError, ValueError):
+            return None
+        try:
+            async with AsyncSessionLocal() as db:
+                row = AnalysisSnapshot(
+                    room_id=parsed_room_id,
+                    analyzed_message_count=analyzed_message_count,
+                    analysis_context={
+                        "current_phase": context.get("current_phase"),
+                        "phase_goal": context.get("phase_goal"),
+                        "elapsed_minutes": context.get("elapsed_minutes"),
+                    },
+                    rule_metrics={},
+                    cognitive_report=cognitive.get("cognitive_report"),
+                    behavioral_report=behavioral.get("behavioral_report"),
+                    emotional_report=emotional.get("emotional_report"),
+                    social_report=social.get("social_report"),
+                    social_cps_report=social.get("social_cps_report"),
+                    interaction_report={
+                        "compat": True,
+                        "behavioral": behavioral.get("behavioral_report"),
+                        "social": social.get("social_report"),
+                    },
+                    diversity_score=cognitive.get("diversity_score"),
+                    progress_score=cognitive.get("progress_score"),
+                    behavioral_score=behavioral.get("behavioral_score"),
+                    social_score=social.get("social_score"),
+                    balance_score=(1.0 - max((v.get("score", 0.0) for v in (behavioral.get("participation_scores") or {}).values()), default=0.0)),
+                    participation_scores=behavioral.get("participation_scores"),
+                    is_single_dominated=behavioral.get("is_single_dominated"),
+                    dominant_members=behavioral.get("dominant_members"),
+                    silent_members=behavioral.get("silent_members"),
+                    emotion_flags=emotional.get("emotion_flags"),
+                    should_intervene=bool(decision.get("should_intervene")),
+                    selected_agent_role=decision.get("selected_agent_role"),
+                    selected_strategy=decision.get("strategy"),
+                    dispatcher_decision=decision,
+                )
+                db.add(row)
+                await db.commit()
+                await db.refresh(row)
+                return str(row.id)
+        except Exception:
+            return None
+
+    async def _publish_analysis_update(
+        self,
+        *,
+        room_id: str,
+        snapshot_id: str | None,
+        cognitive: dict,
+        behavioral: dict,
+        emotional: dict,
+        social: dict,
+        decision: dict,
+    ) -> None:
+        try:
+            redis_client = get_redis_client()
+            payload = {
+                "type": "analysis:update",
+                "room_id": room_id,
+                "snapshot_id": snapshot_id,
+                "cognitive_report": cognitive,
+                "behavioral_report": behavioral,
+                "emotional_report": emotional,
+                "social_report": social,
+                "social_cps_report": social.get("social_cps_report"),
+                "decision": decision,
+                "triggered_at": time.time(),
             }
-        }
-
-    async def _interaction_analysis(self, messages: list[dict], members: list[dict]) -> dict:
-        sender_counts = Counter(
-            m.get("sender_id")
-            for m in messages
-            if m.get("sender_type") == "student" and m.get("sender_id")
-        )
-        if not sender_counts or not members:
-            return {"participation_scores": {}, "balance_score": 0.5}
-
-        values = list(sender_counts.values())
-        total = sum(values)
-        max_ratio = max(values) / total if total else 0
-        return {
-            "participation_scores": dict(sender_counts),
-            "balance_score": 1.0 - max_ratio,
-        }
-
-    def _dispatch(self, cognitive: dict, emotional: dict, interaction: dict) -> list[dict]:
-        cfg = get_agent_settings()
-        auto_speak = getattr(cfg, "auto_speak", None)
-        committee_devil_advocate_enabled = (
-            True if auto_speak is None else getattr(auto_speak, "committee_devil_advocate_enabled", True)
-        )
-        committee_summarizer_enabled = (
-            True if auto_speak is None else getattr(auto_speak, "committee_summarizer_enabled", True)
-        )
-        committee_encourager_enabled = (
-            True if auto_speak is None else getattr(auto_speak, "committee_encourager_enabled", True)
-        )
-        interventions = []
-
-        if committee_devil_advocate_enabled and cognitive["diversity_score"] < cfg.thresholds.diversity_score_threshold:
-            interventions.append(
-                {
-                    "role": "devil_advocate",
-                    "reason": (
-                        f"观点多样性偏低（{cognitive['diversity_score']:.2f}），"
-                        "引入反向思考避免过早收敛。"
-                    ),
-                    "strategy": "提出一个与当前主流观点相反但合理的假设，要求小组验证。",
-                    "priority": 1,
-                }
-            )
-
-        if committee_summarizer_enabled and emotional["emotion_flags"]["conflict"]:
-            interventions.append(
-                {
-                    "role": "summarizer",
-                    "reason": "检测到冲突性表达，先梳理共识与分歧，降低争执成本。",
-                    "strategy": "总结双方共识与核心分歧，并给出一个可验证的下一步问题。",
-                    "priority": 1,
-                }
-            )
-
-        if (
-            committee_encourager_enabled
-            and emotional["emotion_flags"]["passive"]
-            and interaction["balance_score"] < cfg.thresholds.balance_score_threshold
-        ):
-            interventions.append(
-                {
-                    "role": "encourager",
-                    "reason": "出现消极表达且参与不均衡，需激活低参与成员。",
-                    "strategy": "温和点名一位低参与同学，邀请其补充一个具体看法。",
-                    "priority": 1,
-                }
-            )
-
-        return interventions
+            await redis_client.publish(f"room:{room_id}", json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            return
 
 
 basic_committee = BasicCommittee()

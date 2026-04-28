@@ -7,7 +7,7 @@ from alembic import context
 
 # 导入所有模型，确保 Alembic 感知完整表结构（顺序与 models/__init__.py 一致）
 from app.db.session import Base
-from app.models import User, Task, Room, RoomMember  # noqa: F401
+from app.models import User, Task, Room, RoomMember, AnalysisSnapshot  # noqa: F401
 
 config = context.config
 

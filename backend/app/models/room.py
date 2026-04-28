@@ -2,7 +2,7 @@ import uuid
 import enum
 
 from sqlalchemy import Column, String, Enum, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -27,3 +27,4 @@ class Room(Base):
     timer_started_at = Column(DateTime(timezone=True), nullable=True)
     timer_deadline_at = Column(DateTime(timezone=True), nullable=True)
     timer_stopped_at = Column(DateTime(timezone=True), nullable=True)
+    locked_member_ids = Column(JSONB, nullable=True)

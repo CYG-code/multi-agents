@@ -169,6 +169,22 @@ async def join_room(
     return {"detail": "已加入房间"}
 
 
+
+
+@router.post("/{room_id}/leave", status_code=200)
+async def leave_room(
+    room_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    room = await room_service.get_room(db, room_id)
+    if not room:
+        raise RoomNotFoundError()
+    if room.timer_started_at is not None and room.timer_stopped_at is None:
+        raise HTTPException(status_code=409, detail="Room members are locked after timer starts")
+    await room_service.leave_room(db, room_id, current_user.id)
+    return {"detail": "Left room"}
+
 @router.patch("/{room_id}", response_model=RoomResponse)
 async def update_room(
     room_id: UUID,

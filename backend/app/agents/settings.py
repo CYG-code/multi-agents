@@ -48,9 +48,10 @@ class ModelConfigItem(BaseModel):
 
 
 class ModelsConfig(BaseModel):
-    cognitive_analyst: ModelConfigItem = Field(default_factory=ModelConfigItem)
-    emotional_analyst: ModelConfigItem = Field(default_factory=ModelConfigItem)
-    interaction_analyst: ModelConfigItem = Field(default_factory=ModelConfigItem)
+    cognitive_engagement_analyst: ModelConfigItem = Field(default_factory=ModelConfigItem)
+    behavioral_engagement_analyst: ModelConfigItem = Field(default_factory=ModelConfigItem)
+    emotional_engagement_analyst: ModelConfigItem = Field(default_factory=ModelConfigItem)
+    social_engagement_analyst: ModelConfigItem = Field(default_factory=ModelConfigItem)
     chief_dispatcher: ModelConfigItem = Field(default_factory=ModelConfigItem)
     role_agents: ModelConfigItem = Field(default_factory=ModelConfigItem)
 

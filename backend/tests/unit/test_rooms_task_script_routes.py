@@ -369,3 +369,48 @@ def test_save_writing_doc_version_returns_latest_history_for_student(fake_db, mo
     assert called["saved_by"] == str(student.id)
     assert called["saved_by_display_name"] == student.display_name
     assert called["limit"] == 3
+
+
+def test_leave_room_before_timer_start_allowed(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+    room.timer_started_at = None
+    room.timer_stopped_at = None
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    student = _student_user()
+    client = _build_client(fake_db, student)
+    called = {}
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    async def _fake_leave(_db, _room_id, _user_id):
+        called["room_id"] = _room_id
+        called["user_id"] = _user_id
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+    monkeypatch.setattr(rooms.room_service, "leave_room", _fake_leave)
+
+    resp = client.post(f"/api/rooms/{room_id}/leave")
+
+    assert resp.status_code == 200
+    assert called["room_id"] == room_id
+    assert called["user_id"] == student.id
+
+
+def test_leave_room_after_timer_start_forbidden(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4(), status=RoomStatus.waiting)
+    room.timer_started_at = datetime.now(timezone.utc)
+    room.timer_stopped_at = None
+    fake_db.execute_result = FakeExecuteResult(scalar_value=object())
+    client = _build_client(fake_db, _student_user())
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+
+    resp = client.post(f"/api/rooms/{room_id}/leave")
+
+    assert resp.status_code == 409
