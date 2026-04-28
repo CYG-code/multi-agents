@@ -316,6 +316,7 @@ export const useRoomStore = defineStore('room', {
         required_confirmations: Number(state.required_confirmations || 3),
         confirmations: Array.isArray(state.confirmations) ? state.confirmations : [],
         final_submitted_at: state.final_submitted_at || null,
+        action: state.action || null,
       }
     },
 
@@ -329,6 +330,7 @@ export const useRoomStore = defineStore('room', {
           required_confirmations: Number(state.required_confirmations || 3),
           confirmations: Array.isArray(state.confirmations) ? state.confirmations : [],
           final_submitted_at: state.final_submitted_at || null,
+          action: state.action || null,
         }
       } catch (error) {
         this.writingSubmitError = error.response?.data?.detail || 'Load writing submit state failed'
@@ -352,6 +354,7 @@ export const useRoomStore = defineStore('room', {
           required_confirmations: Number(state.required_confirmations || 3),
           confirmations: Array.isArray(state.confirmations) ? state.confirmations : [],
           final_submitted_at: state.final_submitted_at || null,
+          action: state.action || null,
         }
       } catch (error) {
         this.writingSubmitError = error.response?.data?.detail || 'Confirm writing submission failed'

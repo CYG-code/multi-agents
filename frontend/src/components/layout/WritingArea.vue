@@ -43,20 +43,13 @@
         />
       </button>
       <button
-        type="button"
-        class="ml-auto rounded border border-indigo-200 bg-white px-2 py-1 text-xs text-indigo-600 hover:bg-indigo-50"
-        @click="toggleHistory"
-      >
-        {{ historyPanelOpen ? '收起历史' : '版本历史' }}
-      </button>
-      <button
+        class="ml-auto rounded border border-emerald-200 bg-white px-2 py-1 text-xs text-emerald-600 hover:bg-emerald-50 disabled:opacity-60"
         v-if="isStudent"
         type="button"
-        class="rounded border border-emerald-200 bg-white px-2 py-1 text-xs text-emerald-600 hover:bg-emerald-50 disabled:opacity-60"
         :disabled="savingVersion"
         @click="saveVersion"
       >
-        {{ savingVersion ? '保存中...' : '保存版本' }}
+        {{ savingVersion ? '保存中...' : '保存' }}
       </button>
     </div>
 
@@ -76,28 +69,6 @@
       @blur="handleBlur"
       @focus="handleFocus"
     ></div>
-
-    <div v-if="historyPanelOpen" class="mt-2 max-h-44 overflow-auto rounded border border-gray-200 bg-gray-50 p-2">
-      <p class="mb-2 text-xs font-semibold text-gray-600">写作区版本历史</p>
-      <p v-if="loadingHistory" class="text-xs text-gray-400">加载中...</p>
-      <p v-else-if="historyItems.length === 0" class="text-xs text-gray-400">暂无历史</p>
-      <div v-else class="space-y-1">
-        <div v-for="item in historyItems" :key="item.version" class="rounded border border-gray-200 bg-white px-2 py-1">
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-[11px] text-gray-600">v{{ item.version }} · {{ formatWhen(item.saved_at || item.updated_at) }} · {{ item.saved_by_display_name || item.updated_by_display_name || '未知用户' }}</span>
-            <button
-              v-if="isTeacher"
-              type="button"
-              class="rounded border border-amber-300 px-2 py-0.5 text-[11px] text-amber-700 hover:bg-amber-50 disabled:opacity-60"
-              :disabled="restoringVersion === item.version"
-              @click="restoreVersion(item.version)"
-            >
-              {{ restoringVersion === item.version ? '回滚中...' : '回滚到此版本' }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
 
     <div class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">
       提交进度：{{ confirmCount }}/{{ requiredConfirmations }} 人确认
@@ -145,10 +116,6 @@ const lastLocalEditAt = ref(0)
 const lastAwarenessSentAt = ref(0)
 const docVersion = ref(0)
 const awarenessMap = ref({})
-const historyPanelOpen = ref(false)
-const historyItems = ref([])
-const loadingHistory = ref(false)
-const restoringVersion = ref(0)
 const savingVersion = ref(false)
 const undoStack = ref([])
 const redoStack = ref([])
@@ -163,8 +130,6 @@ let awarenessCleaner = null
 let awarenessHeartbeat = null
 
 const storageKey = computed(() => `room:${roomId}:writing_draft`)
-
-const isTeacher = computed(() => authStore.isTeacher)
 
 const writingState = computed(() => {
   return (
@@ -182,6 +147,8 @@ const confirmCount = computed(() => confirmations.value.length)
 const isFinalSubmitted = computed(() => !!writingState.value.final_submitted_at)
 const isStudent = computed(() => authStore.user?.role === 'student')
 const myUserId = computed(() => String(authStore.user?.id || ''))
+const timerStarted = computed(() => !!roomStore.timerStartedAt)
+const MIN_WRITING_SUBMIT_CHARS = 50
 
 const isMeConfirmed = computed(() => {
   if (!myUserId.value) return false
@@ -213,14 +180,19 @@ const submitDisplay = computed(() => {
 const canConfirmSubmit = computed(() => {
   if (isFinalSubmitted.value) return false
   if (!isStudent.value) return false
-  if (isMeConfirmed.value) return false
+  if (!timerStarted.value) return false
+  if (wordCount.value < MIN_WRITING_SUBMIT_CHARS) return false
   return !roomStore.confirmingWritingSubmit
 })
 
 const submitButtonText = computed(() => {
   if (isFinalSubmitted.value) return `已提交 ${submitDisplay.value}`
+  if (!timerStarted.value) return '计时未开始，暂不可提交'
+  if (wordCount.value < MIN_WRITING_SUBMIT_CHARS) {
+    return `至少 ${MIN_WRITING_SUBMIT_CHARS} 字（当前 ${wordCount.value} 字）`
+  }
   if (roomStore.confirmingWritingSubmit) return '确认中...'
-  if (isMeConfirmed.value) return '已确认，等待他人'
+  if (isMeConfirmed.value) return '取消确认'
   return '确认提交答题'
 })
 
@@ -427,7 +399,17 @@ function handleColorChange() {
 
 async function confirmSubmit() {
   if (!roomId) return
-  await roomStore.confirmWritingSubmit(roomId)
+  try {
+    await roomStore.confirmWritingSubmit(roomId)
+  } catch (error) {
+    const detail = error?.response?.data?.detail
+    const message =
+      (typeof detail === 'object' && detail?.message) ||
+      (typeof detail === 'string' && detail) ||
+      '当前不满足提交条件'
+    window.alert(message)
+    return
+  }
   reportWritingActivity()
 }
 
@@ -450,53 +432,13 @@ async function initWritingDoc() {
   }
 }
 
-function formatWhen(isoText) {
-  if (!isoText) return '--'
-  const d = new Date(isoText)
-  if (Number.isNaN(d.getTime())) return '--'
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
-}
-
-async function loadHistory() {
-  if (!roomId) return
-  loadingHistory.value = true
-  try {
-    const res = await roomApi.getWritingDocHistory(roomId, { limit: 3 })
-    historyItems.value = Array.isArray(res?.items) ? res.items : []
-  } finally {
-    loadingHistory.value = false
-  }
-}
-
 async function saveVersion() {
   if (!roomId || !isStudent.value || savingVersion.value) return
   savingVersion.value = true
   try {
-    const res = await roomApi.saveWritingDocVersion(roomId)
-    if (historyPanelOpen.value) {
-      historyItems.value = Array.isArray(res?.items) ? res.items : []
-    }
+    await roomApi.saveWritingDocVersion(roomId)
   } finally {
     savingVersion.value = false
-  }
-}
-
-async function toggleHistory() {
-  historyPanelOpen.value = !historyPanelOpen.value
-  if (historyPanelOpen.value) {
-    await loadHistory()
-  }
-}
-
-async function restoreVersion(version) {
-  if (!roomId || !isTeacher.value) return
-  if (!window.confirm(`确认回滚到 v${version} 吗？`)) return
-  restoringVersion.value = version
-  try {
-    await roomApi.restoreWritingDocVersion(roomId, version)
-    await loadHistory()
-  } finally {
-    restoringVersion.value = 0
   }
 }
 

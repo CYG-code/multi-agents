@@ -38,6 +38,16 @@ async def test_verify_token_returns_none_for_invalid_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_verify_token_returns_none_for_none_token():
+    db = _FakeDB()
+
+    result = await handlers.verify_token(None, db)
+
+    assert result is None
+    assert db.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_verify_token_returns_user_for_valid_payload(monkeypatch):
     user_id = uuid.uuid4()
     expected_user = User(

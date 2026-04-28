@@ -43,11 +43,8 @@ export const roomApi = {
   getWritingDocState(roomId) {
     return api.get(`/rooms/${roomId}/writing-doc`)
   },
-  getWritingDocHistory(roomId, params = {}) {
-    return api.get(`/rooms/${roomId}/writing-doc/history`, { params })
-  },
-  restoreWritingDocVersion(roomId, version) {
-    return api.post(`/rooms/${roomId}/writing-doc/restore`, { version })
+  getWritingDocChangeLog(roomId, params = {}) {
+    return api.get(`/rooms/${roomId}/writing-doc/change-log`, { params })
   },
   saveWritingDocVersion(roomId) {
     return api.post(`/rooms/${roomId}/writing-doc/save-version`)

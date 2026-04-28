@@ -43,6 +43,7 @@ class WritingSubmitStateResponse(BaseModel):
     required_confirmations: int = 3
     confirmations: list[dict] = Field(default_factory=list)
     final_submitted_at: Optional[datetime] = None
+    action: Optional[str] = None
 
 
 class WritingDocStateResponse(BaseModel):
@@ -53,23 +54,18 @@ class WritingDocStateResponse(BaseModel):
     updated_by_display_name: Optional[str] = None
 
 
-class WritingDocHistoryItem(BaseModel):
-    content: str = ""
+class WritingDocChangeLogItem(BaseModel):
+    action: str = "update"
+    at: Optional[datetime] = None
+    actor_id: Optional[str] = None
+    actor_display_name: Optional[str] = None
     version: int = 0
-    updated_at: Optional[datetime] = None
-    updated_by: Optional[str] = None
-    updated_by_display_name: Optional[str] = None
-    saved_at: Optional[datetime] = None
-    saved_by: Optional[str] = None
-    saved_by_display_name: Optional[str] = None
+    summary: str = ""
+    delta_chars: int = 0
 
 
-class WritingDocHistoryResponse(BaseModel):
-    items: list[WritingDocHistoryItem] = Field(default_factory=list)
-
-
-class WritingDocRestoreRequest(BaseModel):
-    version: int
+class WritingDocChangeLogResponse(BaseModel):
+    items: list[WritingDocChangeLogItem] = Field(default_factory=list)
 
 
 class RoomResponse(BaseModel):
@@ -79,6 +75,7 @@ class RoomResponse(BaseModel):
     created_by: UUID
     status: RoomStatus
     member_count: int = 0
+    student_count: int = 0
     online_count: int = 0
     timer_started_at: Optional[datetime] = None
     timer_deadline_at: Optional[datetime] = None

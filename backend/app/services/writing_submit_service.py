@@ -45,16 +45,19 @@ async def clear_writing_submit_state(room_id: str) -> dict:
     return _normalize_state({})
 
 
-async def confirm_writing_submit(room_id: str, current_user: User) -> tuple[dict, bool]:
+async def confirm_writing_submit(room_id: str, current_user: User) -> tuple[dict, bool, str]:
     redis_client = get_redis_client()
     state = await get_writing_submit_state(room_id)
 
     if state.get("final_submitted_at"):
-        return state, False
+        return state, False, "finalized"
 
     user_id = str(current_user.id)
     already_confirmed = any(str(item.get("user_id")) == user_id for item in state["confirmations"])
-    if not already_confirmed:
+    action = "unconfirmed" if already_confirmed else "confirmed"
+    if already_confirmed:
+        state["confirmations"] = [item for item in state["confirmations"] if str(item.get("user_id")) != user_id]
+    else:
         state["confirmations"].append(
             {
                 "user_id": user_id,
@@ -66,8 +69,9 @@ async def confirm_writing_submit(room_id: str, current_user: User) -> tuple[dict
     finalized = len(state["confirmations"]) >= WRITING_REQUIRED_CONFIRMATIONS
     if finalized and not state.get("final_submitted_at"):
         state["final_submitted_at"] = datetime.now(timezone.utc).isoformat()
+        action = "finalized"
 
     import json
 
     await redis_client.set(_writing_submit_key(room_id), json.dumps(state, ensure_ascii=False))
-    return state, finalized
+    return state, finalized, action

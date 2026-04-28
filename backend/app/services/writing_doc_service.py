@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from app.db.redis_client import get_redis_client
 
-SAVED_HISTORY_MAX_LEN = 3
+CHANGE_LOG_MAX_LEN = 100
 
 
 def _state_key(room_id: str) -> str:
@@ -16,8 +16,8 @@ def _version_key(room_id: str) -> str:
     return f"room:{room_id}:writing_doc_version"
 
 
-def _history_key(room_id: str) -> str:
-    return f"room:{room_id}:writing_doc_history"
+def _change_log_key(room_id: str) -> str:
+    return f"room:{room_id}:writing_doc_change_log"
 
 
 def _empty_state() -> dict:
@@ -50,15 +50,51 @@ async def get_writing_doc_state(room_id: str) -> dict:
     }
 
 
-async def _append_history(room_id: str, state: dict) -> None:
+async def _append_change_log(room_id: str, item: dict) -> None:
     redis_client = get_redis_client()
-    await redis_client.lpush(_history_key(room_id), json.dumps(state, ensure_ascii=False))
-    await redis_client.ltrim(_history_key(room_id), 0, SAVED_HISTORY_MAX_LEN - 1)
+    await redis_client.lpush(_change_log_key(room_id), json.dumps(item, ensure_ascii=False))
+    await redis_client.ltrim(_change_log_key(room_id), 0, CHANGE_LOG_MAX_LEN - 1)
 
 
-async def get_writing_doc_history(room_id: str, limit: int = 20) -> list[dict]:
+def _build_change_summary(before_content: str, after_content: str, action: str) -> tuple[str, int]:
+    before_len = len(before_content.strip())
+    after_len = len(after_content.strip())
+    delta = after_len - before_len
+    if action == "save_checkpoint":
+        return f"保存检查点（{after_len}字）", 0
+    if delta > 0:
+        return f"新增约{delta}字", delta
+    if delta < 0:
+        return f"删除约{abs(delta)}字", delta
+    return "格式或内容调整", 0
+
+
+async def append_writing_doc_change_log(
+    room_id: str,
+    action: str,
+    actor_id: str,
+    actor_display_name: str | None,
+    version: int,
+    before_content: str,
+    after_content: str,
+) -> dict:
+    summary, delta_chars = _build_change_summary(before_content, after_content, action)
+    item = {
+        "action": action,
+        "at": datetime.now(timezone.utc).isoformat(),
+        "actor_id": str(actor_id),
+        "actor_display_name": actor_display_name or None,
+        "version": int(version),
+        "summary": summary,
+        "delta_chars": int(delta_chars),
+    }
+    await _append_change_log(room_id, item)
+    return item
+
+
+async def get_writing_doc_change_log(room_id: str, limit: int = 30) -> list[dict]:
     redis_client = get_redis_client()
-    raw_items = await redis_client.lrange(_history_key(room_id), 0, max(0, limit - 1))
+    raw_items = await redis_client.lrange(_change_log_key(room_id), 0, max(0, limit - 1))
     results: list[dict] = []
     for raw in raw_items:
         try:
@@ -69,14 +105,13 @@ async def get_writing_doc_history(room_id: str, limit: int = 20) -> list[dict]:
             continue
         results.append(
             {
-                "content": str(parsed.get("content") or ""),
+                "action": str(parsed.get("action") or "update"),
+                "at": parsed.get("at"),
+                "actor_id": parsed.get("actor_id"),
+                "actor_display_name": parsed.get("actor_display_name"),
                 "version": int(parsed.get("version") or 0),
-                "updated_at": parsed.get("updated_at"),
-                "updated_by": parsed.get("updated_by"),
-                "updated_by_display_name": parsed.get("updated_by_display_name"),
-                "saved_at": parsed.get("saved_at"),
-                "saved_by": parsed.get("saved_by"),
-                "saved_by_display_name": parsed.get("saved_by_display_name"),
+                "summary": str(parsed.get("summary") or ""),
+                "delta_chars": int(parsed.get("delta_chars") or 0),
             }
         )
     return results
@@ -114,6 +149,7 @@ async def apply_writing_doc_update_with_base_version(
       - applied=False: client is stale; return current authoritative state
     """
     current_state = await get_writing_doc_state(room_id)
+    before_content = str(current_state.get("content") or "")
     current_version = int(current_state.get("version") or 0)
     if base_version is not None and int(base_version) < current_version:
         return current_state, False
@@ -124,26 +160,16 @@ async def apply_writing_doc_update_with_base_version(
         updated_by,
         updated_by_display_name=updated_by_display_name,
     )
-    return next_state, True
-
-
-async def restore_writing_doc_version(
-    room_id: str,
-    target_version: int,
-    updated_by: str,
-    updated_by_display_name: str | None = None,
-) -> dict:
-    history = await get_writing_doc_history(room_id, limit=SAVED_HISTORY_MAX_LEN)
-    target = next((item for item in history if int(item.get("version") or 0) == int(target_version)), None)
-    if not target:
-        raise ValueError("target version not found")
-
-    return await apply_writing_doc_update(
-        room_id,
-        target.get("content") or "",
-        updated_by=updated_by,
-        updated_by_display_name=updated_by_display_name,
+    await append_writing_doc_change_log(
+        room_id=room_id,
+        action="update",
+        actor_id=updated_by,
+        actor_display_name=updated_by_display_name,
+        version=int(next_state.get("version") or 0),
+        before_content=before_content,
+        after_content=str(next_state.get("content") or ""),
     )
+    return next_state, True
 
 
 async def save_writing_doc_version(
@@ -155,15 +181,12 @@ async def save_writing_doc_version(
     if int(state.get("version") or 0) <= 0:
         raise ValueError("writing doc is empty")
 
-    snapshot = {
-        "content": state.get("content") or "",
-        "version": int(state.get("version") or 0),
-        "updated_at": state.get("updated_at"),
-        "updated_by": state.get("updated_by"),
-        "updated_by_display_name": state.get("updated_by_display_name"),
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-        "saved_by": str(saved_by),
-        "saved_by_display_name": saved_by_display_name or None,
-    }
-    await _append_history(room_id, snapshot)
-    return snapshot
+    return await append_writing_doc_change_log(
+        room_id=room_id,
+        action="save_checkpoint",
+        actor_id=str(saved_by),
+        actor_display_name=saved_by_display_name,
+        version=int(state.get("version") or 0),
+        before_content=str(state.get("content") or ""),
+        after_content=str(state.get("content") or ""),
+    )

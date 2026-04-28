@@ -33,7 +33,9 @@ from app.services import writing_doc_service
 from app.websocket.manager import manager
 
 
-async def verify_token(token: str, db: AsyncSession) -> tuple[User, str] | None:
+async def verify_token(token: str | None, db: AsyncSession) -> tuple[User, str] | None:
+    if not isinstance(token, str) or not token.strip():
+        return None
     try:
         payload = decode_access_token(token)
         user_id = payload.get("sub")
@@ -43,7 +45,7 @@ async def verify_token(token: str, db: AsyncSession) -> tuple[User, str] | None:
         if not token_jti:
             return None
         parsed_id = UUID(user_id)
-    except (JWTError, ValueError, TypeError):
+    except (JWTError, ValueError, TypeError, AttributeError):
         return None
 
     try:
@@ -279,22 +281,37 @@ async def websocket_endpoint(
 
     try:
         auth_data = await websocket.receive_json()
+    except WebSocketDisconnect:
+        return
     except Exception:
-        await websocket.close(code=4002, reason="Auth timeout")
+        try:
+            await websocket.close(code=4002, reason="Auth timeout")
+        except RuntimeError:
+            # Client already gone during handshake.
+            pass
         return
 
     if auth_data.get("type") != "auth":
-        await websocket.close(code=4001, reason="First frame must be auth")
+        try:
+            await websocket.close(code=4001, reason="First frame must be auth")
+        except RuntimeError:
+            pass
         return
 
     verified = await verify_token(auth_data.get("token", ""), db)
     if not verified:
-        await websocket.close(code=4001, reason="Invalid token")
+        try:
+            await websocket.close(code=4001, reason="Invalid token")
+        except RuntimeError:
+            pass
         return
     user, session_jti = verified
 
     if not await is_room_member(user.id, room_id, db):
-        await websocket.close(code=4003, reason="Not a room member")
+        try:
+            await websocket.close(code=4003, reason="Not a room member")
+        except RuntimeError:
+            pass
         return
 
     await manager.connect(websocket, room_id, user, session_jti=session_jti)
@@ -326,6 +343,21 @@ async def websocket_endpoint(
             if data.get("type") == "writing:awareness":
                 await handle_writing_awareness(data, room_id, user)
     except WebSocketDisconnect:
+        await manager.disconnect(websocket, room_id, str(user.id), session_jti=session_jti)
+        online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
+        await manager.broadcast_to_room(
+            room_id,
+            {
+                "type": "room:user_leave",
+                "user_id": str(user.id),
+                "display_name": user.display_name,
+                "online_count": online_count,
+            },
+        )
+    except RuntimeError as exc:
+        # Starlette may raise RuntimeError instead of WebSocketDisconnect on closed sockets.
+        if "WebSocket is not connected" not in str(exc):
+            raise
         await manager.disconnect(websocket, room_id, str(user.id), session_jti=session_jti)
         online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
         await manager.broadcast_to_room(

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.message import Message
 from app.models.room import Room, RoomStatus
 from app.models.room_member import RoomMember
+from app.models.user import User, UserRole
 from app.schemas.room import RoomCreate
 
 
@@ -60,6 +61,19 @@ async def get_member_ids(db: AsyncSession, room_id: UUID) -> list[str]:
 async def get_member_count(db: AsyncSession, room_id: UUID) -> int:
     result = await db.execute(
         select(func.count()).where(RoomMember.room_id == room_id)
+    )
+    return result.scalar_one()
+
+
+async def get_student_count(db: AsyncSession, room_id: UUID) -> int:
+    result = await db.execute(
+        select(func.count())
+        .select_from(RoomMember)
+        .join(User, User.id == RoomMember.user_id)
+        .where(
+            RoomMember.room_id == room_id,
+            User.role == UserRole.student,
+        )
     )
     return result.scalar_one()
 

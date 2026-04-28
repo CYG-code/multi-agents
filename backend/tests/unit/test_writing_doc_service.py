@@ -80,29 +80,25 @@ async def test_apply_update_with_stale_base_returns_current_without_apply(monkey
 
 
 @pytest.mark.asyncio
-async def test_history_and_restore(monkeypatch):
+async def test_change_log_records_update_and_save(monkeypatch):
     fake_redis = _FakeRedis()
     monkeypatch.setattr(writing_doc_service, "get_redis_client", lambda: fake_redis)
 
-    s1 = await writing_doc_service.apply_writing_doc_update("r4", "A", "u1", "Alice")
-    await writing_doc_service.save_writing_doc_version("r4", "u1", "Alice")
-    s2 = await writing_doc_service.apply_writing_doc_update("r4", "B", "u2", "Bob")
+    s1, applied1 = await writing_doc_service.apply_writing_doc_update_with_base_version(
+        "r4", "A", "u1", "Alice", base_version=0
+    )
+    s2, applied2 = await writing_doc_service.apply_writing_doc_update_with_base_version(
+        "r4", "B", "u2", "Bob", base_version=1
+    )
     await writing_doc_service.save_writing_doc_version("r4", "u2", "Bob")
-    await writing_doc_service.restore_writing_doc_version("r4", s1["version"], "u3", "Teacher")
-    await writing_doc_service.save_writing_doc_version("r4", "u3", "Teacher")
-    await writing_doc_service.apply_writing_doc_update("r4", "C", "u1", "Alice")
-    await writing_doc_service.save_writing_doc_version("r4", "u1", "Alice")
-    await writing_doc_service.apply_writing_doc_update("r4", "D", "u1", "Alice")
-    await writing_doc_service.save_writing_doc_version("r4", "u1", "Alice")
+    logs = await writing_doc_service.get_writing_doc_change_log("r4", limit=10)
 
-    history = await writing_doc_service.get_writing_doc_history("r4", limit=10)
-    restore_target_version = history[-1]["version"]
-    restore_target_content = history[-1]["content"]
-    restored = await writing_doc_service.restore_writing_doc_version("r4", restore_target_version, "u9", "Teacher2")
-
+    assert applied1 is True
+    assert applied2 is True
     assert s1["version"] == 1
     assert s2["version"] == 2
-    assert len(history) == 3
-    assert all(item.get("saved_at") for item in history)
-    assert restored["version"] >= 3
-    assert restored["content"] == restore_target_content
+    assert len(logs) == 3
+    assert logs[0]["action"] == "save_checkpoint"
+    assert logs[0]["actor_display_name"] == "Bob"
+    assert logs[1]["action"] == "update"
+    assert logs[2]["action"] == "update"

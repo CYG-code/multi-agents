@@ -41,8 +41,10 @@
         </select>
       </div>
 
-      <div v-if="filteredRooms.length === 0" class="py-16 text-center text-gray-400">{{ TXT.noRooms }}</div>
-      <div class="grid grid-cols-1 gap-4">
+      <div v-if="roomsLoading" class="py-16 text-center text-gray-400">{{ TXT.loadingRooms }}</div>
+      <div v-else-if="roomsError" class="py-16 text-center text-red-500">{{ roomsError }}</div>
+      <div v-else-if="filteredRooms.length === 0" class="py-16 text-center text-gray-400">{{ TXT.noRooms }}</div>
+      <div v-else class="grid grid-cols-1 gap-4">
         <div v-for="room in filteredRooms" :key="room.id" class="flex items-center justify-between rounded-xl bg-white p-5 shadow-sm">
           <div>
             <p class="font-medium text-gray-800">{{ room.name }}</p>
@@ -319,6 +321,7 @@ const TXT = {
   manageTemplates: '\u7ba1\u7406\u6a21\u677f',
   createRoom: '\u521b\u5efa\u623f\u95f4',
   noRooms: '\u6682\u65e0\u623f\u95f4',
+  loadingRooms: '\u623f\u95f4\u52a0\u8f7d\u4e2d...',
   searchRoomPlaceholder: '\u68c0\u7d22\u623f\u95f4\u540d\u79f0...',
   filterAll: '\u5168\u90e8\u72b6\u6001',
   statusNotStarted: '\u672a\u5f00\u59cb',
@@ -333,6 +336,7 @@ const TXT = {
   startingTimer: '\u5904\u7406\u4e2d...',
   startTimerConfirm: '\u786e\u8ba4\u5f00\u59cb\u8be5\u623f\u95f4\u768490\u5206\u949f\u8ba1\u65f6\uff1f',
   resetTimerConfirm: '\u786e\u8ba4\u91cd\u7f6e\u8be5\u623f\u95f4\u8ba1\u65f6\uff1f\u91cd\u7f6e\u540e\u5c06\u56de\u5230\u201c\u672a\u5f00\u59cb\u201d\u3002',
+  startTimerNeedThreeStudents: '\u5f53\u524d\u5b66\u751f\u4eba\u6570\u4e0d\u8db33\u4eba\uff0c\u65e0\u6cd5\u5f00\u59cb\u8ba1\u65f6',
   timerActionFailed: '\u64cd\u4f5c\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5',
   roomName: '\u623f\u95f4\u540d\u79f0',
   createMode: '\u521b\u5efa\u65b9\u5f0f',
@@ -373,8 +377,11 @@ const TXT = {
 
 const router = useRouter()
 const authStore = useAuthStore()
+const ROOMS_CACHE_KEY = 'lobby:rooms:last'
 
 const rooms = ref([])
+const roomsLoading = ref(false)
+const roomsError = ref('')
 const roomSearchQuery = ref('')
 const roomStatusFilter = ref('all')
 const showModal = ref(false)
@@ -409,6 +416,7 @@ const timerStartingRoomId = ref('')
 const editingTemplateId = ref('')
 const managerTemplateTitle = ref('')
 const managerTemplateRequirements = ref('')
+let roomsRequestId = 0
 
 const canDelete = computed(() => {
   return !!deletingRoom.value && deleteConfirmName.value.trim() === deletingRoom.value.name
@@ -427,7 +435,10 @@ const filteredRooms = computed(() => {
   })
 })
 
-onMounted(fetchRooms)
+onMounted(async () => {
+  loadRoomsCache()
+  await fetchRooms()
+})
 
 function logout() {
   authStore.logout()
@@ -435,7 +446,36 @@ function logout() {
 }
 
 async function fetchRooms() {
-  rooms.value = await api.get('/rooms')
+  const requestId = ++roomsRequestId
+  roomsLoading.value = true
+  try {
+    const data = await api.get('/rooms')
+    if (requestId !== roomsRequestId) return
+    rooms.value = Array.isArray(data) ? data : []
+    roomsError.value = ''
+    sessionStorage.setItem(ROOMS_CACHE_KEY, JSON.stringify(rooms.value))
+  } catch (error) {
+    if (requestId !== roomsRequestId) return
+    roomsError.value = '房间列表刷新失败，请稍后重试'
+    // Keep last successful rooms to avoid transient blank list.
+  } finally {
+    if (requestId === roomsRequestId) {
+      roomsLoading.value = false
+    }
+  }
+}
+
+function loadRoomsCache() {
+  try {
+    const raw = sessionStorage.getItem(ROOMS_CACHE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      rooms.value = parsed
+    }
+  } catch {
+    // ignore cache parse errors
+  }
 }
 
 function roomPhase(room) {
@@ -465,6 +505,13 @@ function timerActionText(room) {
 async function handleTimerAction(room) {
   if (!room?.id || timerStartingRoomId.value) return
   const shouldStart = roomPhase(room) === 'not_started'
+  if (shouldStart) {
+    const studentCount = Number(room?.student_count ?? 0)
+    if (studentCount < 3) {
+      alert(TXT.startTimerNeedThreeStudents)
+      return
+    }
+  }
   const confirmed = window.confirm(shouldStart ? TXT.startTimerConfirm : TXT.resetTimerConfirm)
   if (!confirmed) return
 
@@ -479,7 +526,12 @@ async function handleTimerAction(room) {
       await fetchRooms()
     }
   } catch (e) {
-    alert(e.response?.data?.detail || TXT.timerActionFailed)
+    const detail = e?.response?.data?.detail
+    const message =
+      (typeof detail === 'object' && detail?.message) ||
+      (typeof detail === 'string' && detail) ||
+      TXT.timerActionFailed
+    alert(message)
   } finally {
     timerStartingRoomId.value = ''
   }

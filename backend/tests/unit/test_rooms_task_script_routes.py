@@ -249,6 +249,27 @@ def test_confirm_writing_submit_forbidden_for_teacher(fake_db, monkeypatch):
     assert resp.status_code == 403
 
 
+def test_start_room_timer_requires_three_students(fake_db, monkeypatch):
+    room_id = uuid.uuid4()
+    room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
+    teacher = _teacher_user()
+    client = _build_client(fake_db, teacher)
+
+    async def _fake_get_room(_db, _room_id):
+        return room
+
+    async def _fake_student_count(_db, _room_id):
+        return 2
+
+    monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
+    monkeypatch.setattr(rooms.room_service, "get_student_count", _fake_student_count)
+
+    resp = client.post(f"/api/rooms/{room_id}/timer/start")
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "ROOM_STUDENT_COUNT_NOT_ENOUGH"
+
+
 def test_get_writing_doc_state_returns_service_result(fake_db, monkeypatch):
     room_id = uuid.uuid4()
     room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
@@ -271,7 +292,7 @@ def test_get_writing_doc_state_returns_service_result(fake_db, monkeypatch):
     assert resp.json()["version"] == 2
 
 
-def test_get_writing_doc_history_returns_items(fake_db, monkeypatch):
+def test_get_writing_doc_change_log_returns_items(fake_db, monkeypatch):
     room_id = uuid.uuid4()
     room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
     fake_db.execute_result = FakeExecuteResult(scalar_value=object())
@@ -280,20 +301,30 @@ def test_get_writing_doc_history_returns_items(fake_db, monkeypatch):
     async def _fake_get_room(_db, _room_id):
         return room
 
-    async def _fake_history(_room_id_str, limit=20):
+    async def _fake_change_log(_room_id_str, limit=30):
         _ = limit
-        return [{"content": "A", "version": 1, "updated_at": None, "updated_by": "u1", "updated_by_display_name": "Alice"}]
+        return [
+            {
+                "action": "update",
+                "at": None,
+                "actor_id": "u1",
+                "actor_display_name": "Alice",
+                "version": 1,
+                "summary": "新增约3字",
+                "delta_chars": 3,
+            }
+        ]
 
     monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
-    monkeypatch.setattr(rooms.writing_doc_service, "get_writing_doc_history", _fake_history)
+    monkeypatch.setattr(rooms.writing_doc_service, "get_writing_doc_change_log", _fake_change_log)
 
-    resp = client.get(f"/api/rooms/{room_id}/writing-doc/history")
+    resp = client.get(f"/api/rooms/{room_id}/writing-doc/change-log")
 
     assert resp.status_code == 200
     assert resp.json()["items"][0]["version"] == 1
 
 
-def test_restore_writing_doc_forbidden_for_student(fake_db, monkeypatch):
+def test_restore_writing_doc_endpoint_is_disabled(fake_db, monkeypatch):
     room_id = uuid.uuid4()
     room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
     fake_db.execute_result = FakeExecuteResult(scalar_value=object())
@@ -306,7 +337,7 @@ def test_restore_writing_doc_forbidden_for_student(fake_db, monkeypatch):
 
     resp = client.post(f"/api/rooms/{room_id}/writing-doc/restore", json={"version": 1})
 
-    assert resp.status_code == 403
+    assert resp.status_code == 410
 
 
 def test_save_writing_doc_version_forbidden_for_teacher(fake_db, monkeypatch):
@@ -325,7 +356,7 @@ def test_save_writing_doc_version_forbidden_for_teacher(fake_db, monkeypatch):
     assert resp.status_code == 403
 
 
-def test_save_writing_doc_version_returns_latest_history_for_student(fake_db, monkeypatch):
+def test_save_writing_doc_version_returns_latest_change_log_for_student(fake_db, monkeypatch):
     room_id = uuid.uuid4()
     room = Room(id=room_id, name="R1", created_by=uuid.uuid4())
     fake_db.execute_result = FakeExecuteResult(scalar_value=object())
@@ -342,24 +373,23 @@ def test_save_writing_doc_version_returns_latest_history_for_student(fake_db, mo
         called["saved_by_display_name"] = saved_by_display_name
         return {"version": 2}
 
-    async def _fake_history(_room_id_str, limit=3):
+    async def _fake_change_log(_room_id_str, limit=30):
         called["limit"] = limit
         return [
             {
-                "content": "<p>x</p>",
+                "action": "save_checkpoint",
+                "at": None,
+                "actor_id": str(student.id),
+                "actor_display_name": student.display_name,
                 "version": 2,
-                "updated_at": None,
-                "updated_by": str(student.id),
-                "updated_by_display_name": student.display_name,
-                "saved_at": None,
-                "saved_by": str(student.id),
-                "saved_by_display_name": student.display_name,
+                "summary": "保存检查点（10字）",
+                "delta_chars": 0,
             }
         ]
 
     monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
     monkeypatch.setattr(rooms.writing_doc_service, "save_writing_doc_version", _fake_save)
-    monkeypatch.setattr(rooms.writing_doc_service, "get_writing_doc_history", _fake_history)
+    monkeypatch.setattr(rooms.writing_doc_service, "get_writing_doc_change_log", _fake_change_log)
 
     resp = client.post(f"/api/rooms/{room_id}/writing-doc/save-version")
 
@@ -368,7 +398,7 @@ def test_save_writing_doc_version_returns_latest_history_for_student(fake_db, mo
     assert called["room_id"] == str(room_id)
     assert called["saved_by"] == str(student.id)
     assert called["saved_by_display_name"] == student.display_name
-    assert called["limit"] == 3
+    assert called["limit"] == 30
 
 
 def test_leave_room_before_timer_start_allowed(fake_db, monkeypatch):
