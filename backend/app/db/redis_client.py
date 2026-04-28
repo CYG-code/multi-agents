@@ -85,6 +85,16 @@ async def cleanup_stale_online_presence(stale_seconds: int = 120) -> None:
             await client.delete(last_seen_key)
 
 
+async def set_user_active_session_jti(user_id: str, jti: str) -> None:
+    client = get_redis_client()
+    await client.set(f"user:{user_id}:active_session_jti", jti)
+
+
+async def get_user_active_session_jti(user_id: str) -> str | None:
+    client = get_redis_client()
+    return await client.get(f"user:{user_id}:active_session_jti")
+
+
 def get_redis_client() -> redis.Redis:
     if _redis_client is None:
         raise RuntimeError("Redis client not initialized. Call init_redis() during app startup.")

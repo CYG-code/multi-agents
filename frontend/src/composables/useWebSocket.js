@@ -1,6 +1,7 @@
 import { ref, onUnmounted } from 'vue'
 import ReconnectingWebSocket from 'reconnecting-websocket'
 import { useAuthStore } from '../stores/auth.js'
+import router from '../router/index.js'
 
 export function useWebSocket(roomId) {
   const authStore = useAuthStore()
@@ -45,6 +46,19 @@ export function useWebSocket(roomId) {
 
     ws.value.onmessage = (event) => {
       const data = JSON.parse(event.data)
+      if (data?.type === 'auth:session_revoked') {
+        authStore.handleSessionRevoked(data?.message || '你的账号已在其他设备登录，当前会话已失效')
+        if (ws.value) {
+          ws.value._shouldReconnect = false
+          try {
+            ws.value.close(4001, 'session revoked')
+          } catch {
+            // ignore close errors
+          }
+        }
+        router.push('/login')
+        return
+      }
       if (data.seq_num != null) {
         lastSeqNum = data.seq_num
       }

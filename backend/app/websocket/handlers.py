@@ -22,6 +22,7 @@ from app.agents.role_agents import ROLE_AGENTS
 from app.agents.settings import get_agent_settings
 from app.analysis.triggers import trigger_detector
 from app.db.redis_client import get_redis_client, touch_online_presence
+from app.db.redis_client import get_user_active_session_jti
 from app.db.session import get_db
 from app.models.room_member import RoomMember
 from app.models.user import User
@@ -29,23 +30,35 @@ from app.schemas.message import ChatMessageFrame
 from app.services.auth_service import decode_access_token
 from app.services.message_service import MessageService
 from app.services import writing_doc_service
-from app.websocket.manager import ConnectionManager
-
-manager = ConnectionManager()
+from app.websocket.manager import manager
 
 
-async def verify_token(token: str, db: AsyncSession) -> User | None:
+async def verify_token(token: str, db: AsyncSession) -> tuple[User, str] | None:
     try:
         payload = decode_access_token(token)
         user_id = payload.get("sub")
+        token_jti = payload.get("jti")
         if not user_id:
+            return None
+        if not token_jti:
             return None
         parsed_id = UUID(user_id)
     except (JWTError, ValueError, TypeError):
         return None
 
+    try:
+        active_jti = await get_user_active_session_jti(user_id)
+        if active_jti and active_jti != token_jti:
+            return None
+    except RuntimeError:
+        # Redis unavailable: keep backward-compatible behavior.
+        pass
+
     result = await db.execute(select(User).where(User.id == parsed_id))
-    return result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+    if user is None:
+        return None
+    return user, token_jti
 
 
 async def is_room_member(user_id: UUID, room_id: str, db: AsyncSession) -> bool:
@@ -274,16 +287,17 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="First frame must be auth")
         return
 
-    user = await verify_token(auth_data.get("token", ""), db)
-    if not user:
+    verified = await verify_token(auth_data.get("token", ""), db)
+    if not verified:
         await websocket.close(code=4001, reason="Invalid token")
         return
+    user, session_jti = verified
 
     if not await is_room_member(user.id, room_id, db):
         await websocket.close(code=4003, reason="Not a room member")
         return
 
-    await manager.connect(websocket, room_id, user)
+    await manager.connect(websocket, room_id, user, session_jti=session_jti)
 
     redis_client = get_redis_client()
     online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
@@ -312,7 +326,7 @@ async def websocket_endpoint(
             if data.get("type") == "writing:awareness":
                 await handle_writing_awareness(data, room_id, user)
     except WebSocketDisconnect:
-        await manager.disconnect(websocket, room_id, str(user.id))
+        await manager.disconnect(websocket, room_id, str(user.id), session_jti=session_jti)
         online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
         await manager.broadcast_to_room(
             room_id,

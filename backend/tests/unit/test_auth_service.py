@@ -21,5 +21,5 @@ def test_create_and_decode_access_token():
 
     assert payload["sub"] == "user-1"
     assert payload["role"] == "student"
+    assert payload["jti"]
     assert "exp" in payload
-

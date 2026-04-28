@@ -48,11 +48,16 @@ async def test_verify_token_returns_user_for_valid_payload(monkeypatch):
         role=UserRole.student,
     )
     db = _FakeDB(expected_user)
-    monkeypatch.setattr(handlers, "decode_access_token", lambda _token: {"sub": str(user_id)})
+    monkeypatch.setattr(handlers, "decode_access_token", lambda _token: {"sub": str(user_id), "jti": "jti-1"})
+
+    async def _fake_get_active_jti(_user_id):
+        return "jti-1"
+
+    monkeypatch.setattr(handlers, "get_user_active_session_jti", _fake_get_active_jti)
 
     result = await handlers.verify_token("token", db)
 
-    assert result == expected_user
+    assert result == (expected_user, "jti-1")
     assert db.calls == 1
 
 
@@ -167,4 +172,3 @@ async def test_handle_chat_message_broadcasts_and_triggers(monkeypatch):
     assert broadcast_payloads[0]["seq_num"] == 12
     assert triggered["mentions"][3] == ["facilitator"]
     assert triggered["monopoly"] == ("room-1", str(user.id))
-
