@@ -6,7 +6,7 @@ cd d:\Projects\multi-agents\backend
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 alembic upgrade head
-python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --port 8001
 ```
 
 ## 前端启动
