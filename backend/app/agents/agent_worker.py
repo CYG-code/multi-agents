@@ -94,14 +94,26 @@ class AgentWorker:
             context = await get_room_context(room_id)
             history = await get_recent_messages(room_id)
             agent = ROLE_AGENTS[agent_role]
-            await agent.generate_and_push(
-                room_id=room_id,
-                context=context,
-                history=history,
-                source_message_id=task.get("source_message_id"),
-                trigger_type=task.get("trigger_type"),
-                task=task,
-            )
+            timeout_seconds = max(5, int(getattr(cfg.timing, "agent_response_timeout_seconds", 90)))
+            try:
+                await asyncio.wait_for(
+                    agent.generate_and_push(
+                        room_id=room_id,
+                        context=context,
+                        history=history,
+                        source_message_id=task.get("source_message_id"),
+                        trigger_type=task.get("trigger_type"),
+                        task=task,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[AgentWorker] timeout room={room_id} role={agent_role} "
+                    f"trigger={task.get('trigger_type')} timeout={timeout_seconds}s"
+                )
+                await requeue_task(room_id, task, delay_seconds=5)
+                return
 
             await redis_client.setex(cooldown_key, cfg.timing.agent_cooldown_seconds, "1")
             if is_auto_trigger:

@@ -1,11 +1,11 @@
 <template>
-  <div class="flex flex-col h-full border border-gray-200 bg-white">
-    <div class="p-3 border-b border-gray-100 flex items-center justify-between">
-      <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Realtime Chat Room</p>
+  <div class="flex h-full flex-col border border-gray-200 bg-white">
+    <div class="flex items-center justify-between border-b border-gray-100 p-3">
+      <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">Realtime Chat Room</p>
       <span class="text-xs text-gray-500">Online {{ onlineCount }}</span>
     </div>
 
-    <div v-if="!connected" class="bg-yellow-100 text-yellow-700 text-xs text-center py-1">
+    <div v-if="!connected" class="py-1 text-center text-xs text-yellow-700 bg-yellow-100">
       Reconnecting to chat server...
     </div>
 
@@ -20,11 +20,11 @@
 
     <AgentTypingIndicator />
 
-    <div v-if="invokeStatusList.length > 0" class="px-3 pb-2 space-y-1">
+    <div v-if="invokeStatusList.length > 0" class="space-y-1 px-3 pb-2">
       <div
         v-for="item in invokeStatusList"
         :key="item.key"
-        class="text-xs rounded-lg border px-2 py-1"
+        class="rounded-lg border px-2 py-1 text-xs"
         :class="statusClass(item.status)"
       >
         {{ roleLabel(item.agent_role) }}：{{ statusText(item.status, item.message) }}
@@ -33,14 +33,14 @@
 
     <div v-if="unreadCount > 0" class="px-3 pb-2">
       <button
-        class="w-full py-2 text-xs rounded-lg bg-blue-50 text-blue-600 border border-blue-100 hover:bg-blue-100 transition-colors"
+        class="w-full rounded-lg border border-blue-100 bg-blue-50 py-2 text-xs text-blue-600 transition-colors hover:bg-blue-100"
         @click="scrollToLatest"
       >
         {{ unreadCount }} new messages, click to jump to latest
       </button>
     </div>
 
-    <ChatInput class="flex-shrink-0" @send="handleSendMessage" />
+    <ChatInput :agent-busy="agentBusy" :cooling-roles="coolingRoles" class="shrink-0" @send="handleSendMessage" />
   </div>
 </template>
 
@@ -69,6 +69,7 @@ const onlineCount = ref(0)
 const unreadCount = ref(0)
 const isAtBottom = ref(true)
 const invokeStatusMap = ref(new Map())
+const cooldownUntilByRole = ref({})
 
 const { connect, on, send, disconnect, connected } = useWebSocket(roomId)
 const { handleTyping, handleStream, handleStreamEnd } = useAgentStream()
@@ -85,6 +86,18 @@ const invokeStatusList = computed(() => {
   return Array.from(invokeStatusMap.value.values())
     .filter((item) => item.status !== 'completed')
     .sort((a, b) => b.updated_at - a.updated_at)
+})
+
+const agentBusy = computed(() => {
+  if (invokeStatusList.value.length > 0) return true
+  return Object.values(agentStore.typingStatus || {}).some((v) => !!v)
+})
+
+const coolingRoles = computed(() => {
+  const now = Date.now()
+  return Object.entries(cooldownUntilByRole.value)
+    .filter(([, until]) => Number(until || 0) > now)
+    .map(([role]) => role)
 })
 
 function roleLabel(role) {
@@ -156,9 +169,7 @@ async function scrollToLatest() {
 
 function handleViewportChange(payload) {
   isAtBottom.value = !!payload?.atBottom
-  if (isAtBottom.value) {
-    unreadCount.value = 0
-  }
+  if (isAtBottom.value) unreadCount.value = 0
 }
 
 async function reloadHistory() {
@@ -195,46 +206,37 @@ onMounted(async () => {
       unreadCount.value = 0
       return
     }
-
     unreadCount.value += 1
   })
 
   on('agent:ack', (data) => {
     upsertInvokeStatus(data)
-    if (data?.status === 'unsupported') {
-      setTemporaryStatus(data, 8000)
-    }
+    if (data?.status === 'unsupported') setTemporaryStatus(data, 8000)
   })
-
-  on('agent:queued', (data) => {
-    upsertInvokeStatus(data)
-  })
-
-  on('agent:thinking', (data) => {
-    upsertInvokeStatus(data)
-  })
-
+  on('agent:queued', upsertInvokeStatus)
+  on('agent:thinking', upsertInvokeStatus)
   on('agent:typing', handleTyping)
 
   on('agent:stream', async (data) => {
     const existed = chatStore.messages.some((m) => m.id === data.message_id)
     handleStream(data)
     await nextTick()
-
     if (isAtBottom.value) {
       scrollToBottom()
       unreadCount.value = 0
       return
     }
-
-    if (!existed) {
-      unreadCount.value += 1
-    }
+    if (!existed) unreadCount.value += 1
   })
 
   on('agent:stream_end', async (data) => {
     handleStreamEnd(data)
-
+    if (data?.agent_role) {
+      cooldownUntilByRole.value = {
+        ...cooldownUntilByRole.value,
+        [data.agent_role]: Date.now() + 5000,
+      }
+    }
     if (data?.source_message_id && data?.agent_role) {
       if (data.status === 'ok') {
         setTemporaryStatus(
@@ -258,45 +260,41 @@ onMounted(async () => {
         )
       }
     }
-
     await nextTick()
-
     if (isAtBottom.value) {
       scrollToBottom()
       unreadCount.value = 0
     }
   })
 
-  on('room:user_join', (data) => {
-    if (typeof data.online_count === 'number') {
-      onlineCount.value = data.online_count
+  on('agent:mention_blocked', (data) => {
+    if (data?.reason === 'agent_cooling' && data?.agent_role) {
+      cooldownUntilByRole.value = {
+        ...cooldownUntilByRole.value,
+        [data.agent_role]: Date.now() + 5000,
+      }
     }
+    window.alert(data?.message || '当前有智能体正在排队或发言，请稍后再 @ 调用。')
   })
 
+  on('room:user_join', (data) => {
+    if (typeof data.online_count === 'number') onlineCount.value = data.online_count
+  })
   on('room:user_leave', (data) => {
-    if (typeof data.online_count === 'number') {
-      onlineCount.value = data.online_count
-    }
+    if (typeof data.online_count === 'number') onlineCount.value = data.online_count
   })
 
   on('task_script:updated', async () => {
     try {
       await roomStore.loadTaskScriptState(roomId)
       await roomStore.loadTaskScriptLockState(roomId)
-    } catch (error) {
+    } catch {
       // ignore transient sync failures
     }
   })
+  on('room:timer_updated', (data) => roomStore.applyRoomTimerUpdate(data))
+  on('room:writing_submit_updated', (data) => roomStore.applyWritingSubmitUpdate(data))
 
-  on('room:timer_updated', (data) => {
-    roomStore.applyRoomTimerUpdate(data)
-  })
-
-  on('room:writing_submit_updated', (data) => {
-    roomStore.applyWritingSubmitUpdate(data)
-  })
-
-  // Re-sync history after reconnect to avoid message gaps.
   on('__reconnect__', async () => {
     unreadCount.value = 0
     agentStore.clearTyping()
@@ -304,7 +302,7 @@ onMounted(async () => {
     await reloadHistory()
     try {
       await roomStore.loadRoomContext(roomId, true)
-    } catch (error) {
+    } catch {
       // ignore transient sync failures
     }
   })

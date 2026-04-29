@@ -1,6 +1,6 @@
 param(
   [switch]$Lan,
-  [int]$Port = 8000,
+  [int]$Port = 8001,
   [switch]$Reload
 )
 

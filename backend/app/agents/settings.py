@@ -17,10 +17,11 @@ class TimingConfig(BaseModel):
     silence_threshold_seconds: int = 120
     analysis_interval_minutes: int = 5
     warmup_minutes: int = 3
-    agent_cooldown_seconds: int = 60
+    agent_cooldown_seconds: int = 5
     global_intervention_limit_per_hour: int = 12
     room_auto_intervention_cooldown_seconds: int = 180
     rule_trigger_marker_ttl_seconds: int = 180
+    agent_response_timeout_seconds: int = 90
 
 
 class ThresholdsConfig(BaseModel):

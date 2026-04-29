@@ -3,10 +3,11 @@ timing:
   silence_threshold_seconds: 120
   analysis_interval_minutes: 5
   warmup_minutes: 3
-  agent_cooldown_seconds: 60
+  agent_cooldown_seconds: 5
   global_intervention_limit_per_hour: 6
   room_auto_intervention_cooldown_seconds: 180
   rule_trigger_marker_ttl_seconds: 180
+  agent_response_timeout_seconds: 90
 
 thresholds:
   diversity_score_threshold: 0.3

@@ -10,7 +10,7 @@ function configureProxy(proxy, label) {
       if (!backendUnavailableWarned) {
         backendUnavailableWarned = true
         console.warn(
-          `[vite] backend not ready yet (${label} -> localhost:${backendPort}); waiting for backend startup...`
+          `[vite] backend not ready yet (${label} -> 127.0.0.1:${backendPort}); waiting for backend startup...`
         )
       }
       return
@@ -28,14 +28,14 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: `http://localhost:${backendPort}`,
+        target: `http://127.0.0.1:${backendPort}`,
         changeOrigin: true,
         configure(proxy) {
           configureProxy(proxy, 'http')
         },
       },
       '/ws': {
-        target: `ws://localhost:${backendPort}`,
+        target: `ws://127.0.0.1:${backendPort}`,
         ws: true,
         changeOrigin: true,
         configure(proxy) {

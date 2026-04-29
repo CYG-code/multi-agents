@@ -1,12 +1,12 @@
 <template>
-  <div class="border-t border-gray-200 p-3 bg-white relative">
-    <div class="mb-2 flex flex-wrap items-center gap-2" v-if="selectedMentions.length > 0">
+  <div class="relative border-t border-gray-200 bg-white p-3">
+    <div v-if="selectedMentions.length > 0" class="mb-2 flex flex-wrap items-center gap-2">
       <span class="text-xs text-gray-500">已选智能体：</span>
       <button
         v-for="role in selectedMentions"
         :key="role"
         type="button"
-        class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-blue-100 text-blue-700 text-xs"
+        class="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-1 text-xs text-blue-700"
         @click="removeMention(role)"
       >
         @{{ roleLabel(role) }}
@@ -14,11 +14,11 @@
       </button>
     </div>
 
-    <div class="flex gap-2 items-end">
+    <div class="flex items-end gap-2">
       <div class="relative">
         <button
           type="button"
-          class="px-3 py-2 border border-gray-300 rounded-xl text-sm hover:bg-gray-50 transition-colors"
+          class="rounded-xl border border-gray-300 px-3 py-2 text-sm transition-colors hover:bg-gray-50"
           @click="toggleMentionPanel"
         >
           @
@@ -26,14 +26,14 @@
 
         <div
           v-if="showMentionPanel"
-          class="absolute bottom-12 left-0 w-52 bg-white border border-gray-200 rounded-xl shadow-lg p-2 z-20"
+          class="absolute bottom-12 left-0 z-20 w-52 rounded-xl border border-gray-200 bg-white p-2 shadow-lg"
         >
-          <p class="text-xs text-gray-500 px-2 py-1">选择智能体</p>
+          <p class="px-2 py-1 text-xs text-gray-500">选择智能体</p>
           <button
             v-for="agent in AGENT_OPTIONS"
             :key="agent.role"
             type="button"
-            class="w-full text-left px-2 py-1.5 rounded-lg text-sm hover:bg-gray-100 transition-colors"
+            class="w-full rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100"
             @click="toggleMention(agent.role)"
           >
             @{{ agent.label }}
@@ -46,12 +46,12 @@
         @keydown="handleKeydown"
         placeholder="输入消息，回车发送"
         rows="2"
-        class="flex-1 resize-none border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-blue-400"
+        class="flex-1 resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
       />
 
       <button
+        class="rounded-xl bg-blue-500 px-4 py-2 text-sm text-white transition-colors hover:bg-blue-600"
         @click="sendMessage"
-        class="px-4 py-2 bg-blue-500 text-white rounded-xl text-sm hover:bg-blue-600 transition-colors"
       >
         发送
       </button>
@@ -61,6 +61,17 @@
 
 <script setup>
 import { ref } from 'vue'
+
+const props = defineProps({
+  agentBusy: {
+    type: Boolean,
+    default: false,
+  },
+  coolingRoles: {
+    type: Array,
+    default: () => [],
+  },
+})
 
 const emit = defineEmits(['send'])
 
@@ -91,7 +102,6 @@ function toggleMention(role) {
   } else {
     selectedMentions.value = [...selectedMentions.value, role]
   }
-  // 选中后自动关闭面板，避免每次手动收起
   showMentionPanel.value = false
 }
 
@@ -109,6 +119,17 @@ function handleKeydown(event) {
 function sendMessage() {
   const content = inputText.value.trim()
   if (!content) return
+
+  if (selectedMentions.value.some((role) => props.coolingRoles.includes(role))) {
+    window.alert('当前智能体正在冷却中，请稍后再试。')
+    return
+  }
+
+  if (props.agentBusy && selectedMentions.value.length > 0) {
+    window.alert('当前有智能体正在排队或发言，请稍后再 @ 调用。')
+    return
+  }
+
   emit('send', content, selectedMentions.value)
   inputText.value = ''
   selectedMentions.value = []

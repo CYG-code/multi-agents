@@ -18,6 +18,7 @@ from app.agents.agent_messages import (
     MENTION_UNSUPPORTED,
 )
 from app.agents.queue import enqueue_task
+from app.agents.queue import queue_key
 from app.agents.role_agents import ROLE_AGENTS
 from app.agents.settings import get_agent_settings
 from app.analysis.triggers import trigger_detector
@@ -166,7 +167,45 @@ async def _touch_online_presence_best_effort(room_id: str, user_id: str) -> None
         pass
 
 
-async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSession) -> None:
+async def _is_agent_pipeline_busy(room_id: str) -> bool:
+    try:
+        redis_client = get_redis_client()
+    except RuntimeError:
+        return False
+
+    try:
+        if await redis_client.exists(f"room:{room_id}:agent_lock"):
+            return True
+        pending = int(await redis_client.zcard(queue_key(room_id)))
+        return pending > 0
+    except Exception:
+        return False
+
+
+async def _first_cooling_mention_role(room_id: str, mentions: list[str] | None) -> str | None:
+    normalized_mentions = _normalized_mentions(mentions)
+    if not normalized_mentions:
+        return None
+    try:
+        redis_client = get_redis_client()
+    except RuntimeError:
+        return None
+    for role in normalized_mentions:
+        try:
+            if await redis_client.exists(f"cooldown:{room_id}:{role}"):
+                return role
+        except Exception:
+            continue
+    return None
+
+
+async def handle_chat_message(
+    data: dict,
+    room_id: str,
+    user: User,
+    db: AsyncSession,
+    websocket: WebSocket | None = None,
+) -> None:
     try:
         frame = ChatMessageFrame.model_validate(data)
     except ValidationError:
@@ -175,6 +214,30 @@ async def handle_chat_message(data: dict, room_id: str, user: User, db: AsyncSes
     content = frame.content.strip()
     mentions = frame.mentions
     if not content:
+        return
+    cooling_role = await _first_cooling_mention_role(room_id, mentions)
+    if cooling_role:
+        if websocket is not None:
+            await websocket.send_json(
+                {
+                    "type": "agent:mention_blocked",
+                    "reason": "agent_cooling",
+                    "agent_role": cooling_role,
+                    "message": "当前智能体正在冷却中，请稍后再试。",
+                }
+            )
+        return
+
+    normalized_mentions = _normalized_mentions(mentions)
+    if normalized_mentions and await _is_agent_pipeline_busy(room_id):
+        if websocket is not None:
+            await websocket.send_json(
+                {
+                    "type": "agent:mention_blocked",
+                    "reason": "agent_busy",
+                    "message": "当前有智能体正在排队或发言，请稍后再 @ 调用。",
+                }
+            )
         return
 
     msg = await MessageService.save_student_message(db, room_id, str(user.id), content, mentions)
@@ -335,7 +398,7 @@ async def websocket_endpoint(
                 await _touch_online_presence_best_effort(room_id, str(user.id))
                 continue
             if data.get("type") == "chat:message":
-                await handle_chat_message(data, room_id, user, db)
+                await handle_chat_message(data, room_id, user, db, websocket=websocket)
                 continue
             if data.get("type") == "writing:update":
                 await handle_writing_update(websocket, data, room_id, user)

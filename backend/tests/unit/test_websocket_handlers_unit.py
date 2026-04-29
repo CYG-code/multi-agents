@@ -182,3 +182,91 @@ async def test_handle_chat_message_broadcasts_and_triggers(monkeypatch):
     assert broadcast_payloads[0]["seq_num"] == 12
     assert triggered["mentions"][3] == ["facilitator"]
     assert triggered["monopoly"] == ("room-1", str(user.id))
+
+
+@pytest.mark.asyncio
+async def test_handle_chat_message_blocks_mentions_when_agent_busy(monkeypatch):
+    saved = {"called": False}
+    ws_sent = []
+
+    class _FakeRedis:
+        async def exists(self, key):
+            return key == "room:room-1:agent_lock"
+
+        async def zcard(self, _key):
+            return 0
+
+    class _FakeWS:
+        async def send_json(self, payload):
+            ws_sent.append(payload)
+
+    async def _fake_save(*_args, **_kwargs):
+        saved["called"] = True
+
+    user = User(
+        id=uuid.uuid4(),
+        username="student_1",
+        password_hash="x",
+        display_name="Student 1",
+        role=UserRole.student,
+    )
+
+    monkeypatch.setattr(handlers, "get_redis_client", lambda: _FakeRedis())
+    monkeypatch.setattr(handlers.MessageService, "save_student_message", _fake_save)
+
+    await handlers.handle_chat_message(
+        data={"type": "chat:message", "content": "hello", "mentions": ["resource_finder"]},
+        room_id="room-1",
+        user=user,
+        db=object(),
+        websocket=_FakeWS(),
+    )
+
+    assert saved["called"] is False
+    assert ws_sent
+    assert ws_sent[0]["type"] == "agent:mention_blocked"
+
+
+@pytest.mark.asyncio
+async def test_handle_chat_message_blocks_mentions_when_agent_cooling(monkeypatch):
+    saved = {"called": False}
+    ws_sent = []
+
+    class _FakeRedis:
+        async def exists(self, key):
+            return key == "cooldown:room-1:resource_finder"
+
+        async def zcard(self, _key):
+            return 0
+
+    class _FakeWS:
+        async def send_json(self, payload):
+            ws_sent.append(payload)
+
+    async def _fake_save(*_args, **_kwargs):
+        saved["called"] = True
+
+    user = User(
+        id=uuid.uuid4(),
+        username="student_1",
+        password_hash="x",
+        display_name="Student 1",
+        role=UserRole.student,
+    )
+
+    monkeypatch.setattr(handlers, "get_redis_client", lambda: _FakeRedis())
+    monkeypatch.setattr(handlers.MessageService, "save_student_message", _fake_save)
+
+    await handlers.handle_chat_message(
+        data={"type": "chat:message", "content": "hello", "mentions": ["resource_finder"]},
+        room_id="room-1",
+        user=user,
+        db=object(),
+        websocket=_FakeWS(),
+    )
+
+    assert saved["called"] is False
+    assert ws_sent
+    assert ws_sent[0]["type"] == "agent:mention_blocked"
+    assert ws_sent[0]["reason"] == "agent_cooling"
+    assert ws_sent[0]["agent_role"] == "resource_finder"
