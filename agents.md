@@ -18,3 +18,14 @@
 2. 清理范围必须覆盖关联数据：`rooms`、`room_members`、`messages`、以及无引用的测试 `tasks`（如 `E2E*` / `Diag*`）。
 3. 默认使用 `.ai_scratch/agent_test_cleanup_rooms.py` 做前后双清理；运行会写库测试时，优先通过 `.ai_scratch/agent_test_run_with_room_cleanup.ps1` 执行。
 4. 若当次只是临时排查，也必须在汇报前完成清理并复检（输出 `NO_MATCHING_TEST_DATA` 或等价结果）。
+
+## 编码与文本安全规则（新增）
+1. 严禁在 `frontend/src/**/*.vue`、`*.js`、`*.ts` 中引入乱码/编码污染文本（如 `锛歿`、`�`、未闭合字符串）。
+2. 修改含中文文件时，必须使用 UTF-8（建议 UTF-8 with BOM disabled）保存；禁止使用会改变文件编码的批量替换命令。
+3. 每次修改前端 SFC 后，至少执行一次语法级校验：`npm run build`（frontend 目录）或等价检查，确认无 `Unterminated string constant` / parser error。
+4. 若发现历史文件已乱码，先修复语法与编码，再继续功能开发；禁止在乱码状态下叠加业务改动。
+5. 涉及字符串替换时，优先精确 patch；避免用不安全的正则整段替换覆盖多语言文本。
+6. 提交前自检：
+   - `git diff` 检查是否出现异常乱码字符；
+   - 关键文案（按钮、提示、状态）可读；
+   - 前端可正常启动并进入页面。

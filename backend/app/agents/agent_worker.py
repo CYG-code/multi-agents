@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
-import time
+import json
 import uuid
 
 from app.agents.context_builder import get_recent_messages, get_room_context
@@ -49,6 +49,12 @@ class AgentWorker:
 
         cfg = get_agent_settings()
         if not self._is_task_enabled(cfg, task, agent_role):
+            await self._publish_queue_dropped(
+                room_id=room_id,
+                task=task,
+                reason="disabled",
+                message="当前智能体触发条件未启用，本次调用已取消。",
+            )
             print(
                 f"[AgentWorker] drop disabled task room={room_id} role={agent_role} "
                 f"trigger={task.get('trigger_type')} task_id={task.get('task_id')}"
@@ -60,13 +66,13 @@ class AgentWorker:
         is_auto_trigger = not is_user_trigger(trigger_type)
         room_auto_cooldown_key = f"cooldown:{room_id}:auto_intervention"
 
-        hourly_key = f"interventions:{room_id}:{int(time.time() // 3600)}"
-        hourly_count = await redis_client.get(hourly_key)
-        if hourly_count and int(hourly_count) >= cfg.timing.global_intervention_limit_per_hour:
-            print(f"[AgentWorker] room={room_id} hit hourly limit, drop task {task.get('task_id')}")
-            return
-
         if is_auto_trigger and await redis_client.exists(room_auto_cooldown_key):
+            await self._publish_queue_dropped(
+                room_id=room_id,
+                task=task,
+                reason="room_auto_cooldown",
+                message="当前房间自动触发冷却中，本次自动调用已取消。",
+            )
             print(
                 f"[AgentWorker] drop auto task due to room cooldown "
                 f"room={room_id} trigger={trigger_type} role={agent_role}"
@@ -75,9 +81,21 @@ class AgentWorker:
 
         cooldown_key = f"cooldown:{room_id}:{agent_role}"
         if await redis_client.exists(cooldown_key):
+            remaining_seconds = await self._cooldown_remaining_seconds(redis_client, cooldown_key)
             if is_user_trigger(trigger_type):
-                await requeue_task(room_id, task, delay_seconds=10)
+                await self._publish_queue_dropped(
+                    room_id=room_id,
+                    task=task,
+                    reason="role_cooldown",
+                    message=f"当前智能体正在冷却中，请 {remaining_seconds} 秒后再试。",
+                )
             else:
+                await self._publish_queue_dropped(
+                    room_id=room_id,
+                    task=task,
+                    reason="role_cooldown",
+                    message=f"当前智能体冷却中（剩余约 {remaining_seconds} 秒），本次自动调用已取消。",
+                )
                 print(
                     f"[AgentWorker] drop auto task due to role cooldown "
                     f"room={room_id} role={agent_role} trigger={trigger_type}"
@@ -122,9 +140,6 @@ class AgentWorker:
                     int(getattr(cfg.timing, "room_auto_intervention_cooldown_seconds", 180)),
                     "1",
                 )
-            current_count = await redis_client.incr(hourly_key)
-            if current_count == 1:
-                await redis_client.expire(hourly_key, 3600)
             print(
                 f"[AgentWorker] executed room={room_id} role={agent_role} "
                 f"trigger={task.get('trigger_type')} reason={task.get('reason')}"
@@ -134,50 +149,75 @@ class AgentWorker:
             if current_lock == WORKER_ID:
                 await redis_client.delete(lock_key)
 
+    async def _publish_queue_dropped(
+        self,
+        *,
+        room_id: str,
+        task: dict,
+        reason: str,
+        message: str,
+    ) -> None:
+        source_message_id = task.get("source_message_id")
+        agent_role = (task.get("agent_role") or "").strip().lower()
+        if not source_message_id or not agent_role:
+            return
+
+        payload = {
+            "type": "agent:queue_dropped",
+            "source_message_id": source_message_id,
+            "agent_role": agent_role,
+            "task_id": task.get("task_id"),
+            "status": "failed",
+            "reason": reason,
+            "message": message,
+        }
+        try:
+            redis_client = get_redis_client()
+            await redis_client.publish(f"room:{room_id}", json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:
+            print(
+                f"[AgentWorker] publish queue_dropped failed room={room_id} "
+                f"role={agent_role} reason={reason} error={exc}"
+            )
+
+    @staticmethod
+    async def _cooldown_remaining_seconds(redis_client, cooldown_key: str) -> int:
+        try:
+            ttl = await redis_client.ttl(cooldown_key)
+            if isinstance(ttl, int) and ttl > 0:
+                return ttl
+        except Exception:
+            pass
+        return 1
+
     @staticmethod
     def _is_task_enabled(cfg, task: dict, agent_role: str) -> bool:
         trigger_type = (task.get("trigger_type") or "").strip().lower()
         auto_speak = getattr(cfg, "auto_speak", None)
 
-        # Silence-triggered facilitator intervention.
         if trigger_type == "silence" and agent_role == "facilitator":
             facilitator_silence_enabled = (
                 True if auto_speak is None else getattr(auto_speak, "facilitator_silence_enabled", True)
             )
             return bool(getattr(cfg.timing, "silence_trigger_enabled", True) and facilitator_silence_enabled)
 
-        # Monopoly-triggered encourager intervention.
         if trigger_type == "monopoly" and agent_role == "encourager":
             monopoly_enabled = True if auto_speak is None else getattr(auto_speak, "monopoly_encourager_enabled", True)
             return bool(monopoly_enabled)
 
-        # Committee-triggered interventions.
         if trigger_type == "committee":
             committee_enabled = True if auto_speak is None else getattr(auto_speak, "committee_enabled", True)
             if not committee_enabled:
                 return False
 
             if agent_role == "devil_advocate":
-                return bool(
-                    True
-                    if auto_speak is None
-                    else getattr(auto_speak, "committee_devil_advocate_enabled", True)
-                )
+                return bool(True if auto_speak is None else getattr(auto_speak, "committee_devil_advocate_enabled", True))
             if agent_role == "summarizer":
-                return bool(
-                    True
-                    if auto_speak is None
-                    else getattr(auto_speak, "committee_summarizer_enabled", True)
-                )
+                return bool(True if auto_speak is None else getattr(auto_speak, "committee_summarizer_enabled", True))
             if agent_role == "encourager":
-                return bool(
-                    True
-                    if auto_speak is None
-                    else getattr(auto_speak, "committee_encourager_enabled", True)
-                )
+                return bool(True if auto_speak is None else getattr(auto_speak, "committee_encourager_enabled", True))
             return True
 
-        # Mention/debug/manual task types are intentionally not auto-speak gated.
         return True
 
 

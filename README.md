@@ -6,7 +6,7 @@ cd d:\Projects\multi-agents\backend
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 alembic upgrade head
-python -m uvicorn app.main:app --reload --port 8001
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
 ## 前端启动
@@ -64,7 +64,6 @@ cd d:\Projects\multi-agents
 访问：
 
 - `http://localhost:5173/`
-- `http://127.0.0.1:8001/docs`
 
 2. 局域网模式
 

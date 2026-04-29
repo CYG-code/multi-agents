@@ -239,6 +239,11 @@ async def test_handle_chat_message_blocks_mentions_when_agent_cooling(monkeypatc
         async def zcard(self, _key):
             return 0
 
+        async def ttl(self, key):
+            if key == "cooldown:room-1:resource_finder":
+                return 4
+            return -2
+
     class _FakeWS:
         async def send_json(self, payload):
             ws_sent.append(payload)
@@ -270,3 +275,4 @@ async def test_handle_chat_message_blocks_mentions_when_agent_cooling(monkeypatc
     assert ws_sent[0]["type"] == "agent:mention_blocked"
     assert ws_sent[0]["reason"] == "agent_cooling"
     assert ws_sent[0]["agent_role"] == "resource_finder"
+    assert "4" in ws_sent[0]["message"]

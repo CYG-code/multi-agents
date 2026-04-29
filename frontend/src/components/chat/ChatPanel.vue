@@ -1,11 +1,11 @@
-<template>
+﻿<template>
   <div class="flex h-full flex-col border border-gray-200 bg-white">
     <div class="flex items-center justify-between border-b border-gray-100 p-3">
       <p class="text-xs font-semibold uppercase tracking-wide text-gray-400">Realtime Chat Room</p>
       <span class="text-xs text-gray-500">Online {{ onlineCount }}</span>
     </div>
 
-    <div v-if="!connected" class="py-1 text-center text-xs text-yellow-700 bg-yellow-100">
+    <div v-if="!connected" class="bg-yellow-100 py-1 text-center text-xs text-yellow-700">
       Reconnecting to chat server...
     </div>
 
@@ -27,7 +27,7 @@
         class="rounded-lg border px-2 py-1 text-xs"
         :class="statusClass(item.status)"
       >
-        {{ roleLabel(item.agent_role) }}：{{ statusText(item.status, item.message) }}
+        {{ roleLabel(item.agent_role) }}: {{ statusText(item.status, item.message) }}
       </div>
     </div>
 
@@ -40,7 +40,13 @@
       </button>
     </div>
 
-    <ChatInput :agent-busy="agentBusy" :cooling-roles="coolingRoles" class="shrink-0" @send="handleSendMessage" />
+    <ChatInput
+      :agent-busy="agentBusy"
+      :cooling-roles="coolingRoles"
+      :cooldown-until-by-role="cooldownUntilByRole"
+      class="shrink-0"
+      @send="handleSendMessage"
+    />
   </div>
 </template>
 
@@ -75,11 +81,11 @@ const { connect, on, send, disconnect, connected } = useWebSocket(roomId)
 const { handleTyping, handleStream, handleStreamEnd } = useAgentStream()
 
 const ROLE_NAMES = {
-  facilitator: '主持人',
-  devil_advocate: '批判者',
-  summarizer: '总结者',
-  resource_finder: '资源检索者',
-  encourager: '鼓励者',
+  facilitator: 'Facilitator',
+  devil_advocate: 'Devil Advocate',
+  summarizer: 'Summarizer',
+  resource_finder: 'Resource Finder',
+  encourager: 'Encourager',
 }
 
 const invokeStatusList = computed(() => {
@@ -104,15 +110,24 @@ function roleLabel(role) {
   return ROLE_NAMES[role] || role
 }
 
+function parseRemainingSecondsFromMessage(message) {
+  if (!message) return null
+  const match = String(message).match(/(\d+)\s*秒/)
+  if (!match) return null
+  const sec = Number(match[1])
+  if (!Number.isFinite(sec) || sec <= 0) return null
+  return sec
+}
+
 function statusText(status, message) {
   if (message) return message
   const map = {
-    accepted: '已接收',
-    queued: '排队中',
-    thinking: '思考中',
-    failed: '回复失败',
-    unsupported: '当前版本暂不支持该智能体',
-    completed: '回复完成',
+    accepted: 'accepted',
+    queued: 'queued',
+    thinking: 'thinking',
+    failed: 'failed',
+    unsupported: 'unsupported',
+    completed: 'completed',
   }
   return map[status] || status
 }
@@ -244,7 +259,7 @@ onMounted(async () => {
             source_message_id: data.source_message_id,
             agent_role: data.agent_role,
             status: 'completed',
-            message: '回复完成',
+            message: 'completed',
           },
           3000
         )
@@ -254,7 +269,7 @@ onMounted(async () => {
             source_message_id: data.source_message_id,
             agent_role: data.agent_role,
             status: 'failed',
-            message: '回复失败，请重试',
+            message: 'failed, please retry',
           },
           8000
         )
@@ -269,12 +284,27 @@ onMounted(async () => {
 
   on('agent:mention_blocked', (data) => {
     if (data?.reason === 'agent_cooling' && data?.agent_role) {
+      const fromServer = parseRemainingSecondsFromMessage(data?.message)
+      const remainingSeconds = fromServer ?? 5
       cooldownUntilByRole.value = {
         ...cooldownUntilByRole.value,
-        [data.agent_role]: Date.now() + 5000,
+        [data.agent_role]: Date.now() + remainingSeconds * 1000,
       }
     }
-    window.alert(data?.message || '当前有智能体正在排队或发言，请稍后再 @ 调用。')
+    window.alert(data?.message || 'An agent is still busy, please try again in a moment.')
+  })
+
+  on('agent:queue_dropped', (data) => {
+    if (!data?.source_message_id || !data?.agent_role) return
+    setTemporaryStatus(
+      {
+        source_message_id: data.source_message_id,
+        agent_role: data.agent_role,
+        status: 'failed',
+        message: data.message || 'agent task dropped, please retry',
+      },
+      8000
+    )
   })
 
   on('room:user_join', (data) => {

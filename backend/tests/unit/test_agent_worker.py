@@ -11,6 +11,7 @@ class _FakeRedis:
         self.setex_calls = []
         self.values = {}
         self.delete_calls = []
+        self.publish_calls = []
 
     async def get(self, _key):
         return self.values.get(_key)
@@ -40,6 +41,13 @@ class _FakeRedis:
         self.values.pop(_key, None)
         return True
 
+    async def publish(self, channel, message):
+        self.publish_calls.append((channel, message))
+        return 1
+
+    async def ttl(self, _key):
+        return 5
+
 
 class _FakeRedisWithTtl:
     def __init__(self):
@@ -48,6 +56,7 @@ class _FakeRedisWithTtl:
         self.expire_at = {}
         self.setex_calls = []
         self.delete_calls = []
+        self.publish_calls = []
 
     def advance(self, seconds: int):
         self.now += int(seconds)
@@ -101,6 +110,18 @@ class _FakeRedisWithTtl:
         self.expire_at.pop(key, None)
         return True
 
+    async def publish(self, channel, message):
+        self.publish_calls.append((channel, message))
+        return 1
+
+    async def ttl(self, key):
+        if await self.exists(key):
+            exp = self.expire_at.get(key)
+            if exp is None:
+                return -1
+            return max(1, int(exp - self.now))
+        return -2
+
 
 class _CfgTiming:
     global_intervention_limit_per_hour = 99
@@ -150,23 +171,27 @@ async def test_worker_drops_auto_task_when_room_auto_cooldown(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_worker_requeues_mention_task_on_role_cooldown(monkeypatch):
+async def test_worker_drops_mention_task_on_role_cooldown(monkeypatch):
     fake_redis = _FakeRedis()
     fake_redis.keys.add("cooldown:r2:encourager")
-    requeued = []
-
-    async def _fake_requeue(_room_id, _task, delay_seconds=0):
-        requeued.append(delay_seconds)
 
     monkeypatch.setattr(agent_worker, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(agent_worker, "get_agent_settings", lambda: _Cfg())
-    monkeypatch.setattr(agent_worker, "requeue_task", _fake_requeue)
     monkeypatch.setattr(agent_worker, "ROLE_AGENTS", {"encourager": _DummyAgent()})
 
     worker = agent_worker.AgentWorker()
-    await worker._execute_task("r2", {"agent_role": "encourager", "trigger_type": "mention"})
+    await worker._execute_task(
+        "r2",
+        {
+            "agent_role": "encourager",
+            "trigger_type": "mention",
+            "source_message_id": "m-1",
+            "task_id": "t-1",
+        },
+    )
 
-    assert requeued == [10]
+    assert len(fake_redis.publish_calls) == 1
+    assert '"reason": "role_cooldown"' in fake_redis.publish_calls[0][1]
 
 
 @pytest.mark.asyncio
@@ -200,7 +225,6 @@ async def test_worker_requeues_task_when_agent_generation_times_out(monkeypatch)
 @pytest.mark.asyncio
 async def test_worker_multiple_mentions_same_role_second_requeued(monkeypatch):
     fake_redis = _FakeRedisWithTtl()
-    requeued = []
     called = {"count": 0}
 
     class _CfgTimingShort:
@@ -218,9 +242,6 @@ async def test_worker_multiple_mentions_same_role_second_requeued(monkeypatch):
             called["count"] += 1
             return None
 
-    async def _fake_requeue(_room_id, _task, delay_seconds=0):
-        requeued.append(delay_seconds)
-
     async def _fake_context(_room_id):
         return {"current_phase": "middle"}
 
@@ -229,13 +250,12 @@ async def test_worker_multiple_mentions_same_role_second_requeued(monkeypatch):
 
     monkeypatch.setattr(agent_worker, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(agent_worker, "get_agent_settings", lambda: _CfgShort())
-    monkeypatch.setattr(agent_worker, "requeue_task", _fake_requeue)
     monkeypatch.setattr(agent_worker, "get_room_context", _fake_context)
     monkeypatch.setattr(agent_worker, "get_recent_messages", _fake_history)
     monkeypatch.setattr(agent_worker, "ROLE_AGENTS", {"resource_finder": _CountAgent()})
 
     worker = agent_worker.AgentWorker()
-    task = {"agent_role": "resource_finder", "trigger_type": "mention"}
+    task = {"agent_role": "resource_finder", "trigger_type": "mention", "source_message_id": "m-1", "task_id": "t-1"}
 
     await worker._execute_task("r4", task)
     await worker._execute_task("r4", task)
@@ -245,45 +265,9 @@ async def test_worker_multiple_mentions_same_role_second_requeued(monkeypatch):
     await worker._execute_task("r4", task)
 
     assert called["count"] == 2
-    assert requeued == [10, 10]
+    assert len(fake_redis.publish_calls) == 2
+    assert all('"reason": "role_cooldown"' in msg for _, msg in fake_redis.publish_calls)
     assert "cooldown:r4:resource_finder" in fake_redis.values
-
-
-@pytest.mark.asyncio
-async def test_worker_drops_task_when_hourly_limit_hit(monkeypatch):
-    fake_redis = _FakeRedis()
-    fake_redis.values["interventions:r5:0"] = "99"
-    requeued = []
-    called = {"count": 0}
-
-    class _CfgTimingLimited:
-        global_intervention_limit_per_hour = 2
-        agent_cooldown_seconds = 5
-        room_auto_intervention_cooldown_seconds = 180
-        agent_response_timeout_seconds = 1
-
-    class _CfgLimited:
-        timing = _CfgTimingLimited()
-        auto_speak = None
-
-    class _CountAgent:
-        async def generate_and_push(self, **_kwargs):
-            called["count"] += 1
-
-    async def _fake_requeue(_room_id, _task, delay_seconds=0):
-        requeued.append(delay_seconds)
-
-    monkeypatch.setattr(agent_worker, "time", type("T", (), {"time": staticmethod(lambda: 0)})())
-    monkeypatch.setattr(agent_worker, "get_redis_client", lambda: fake_redis)
-    monkeypatch.setattr(agent_worker, "get_agent_settings", lambda: _CfgLimited())
-    monkeypatch.setattr(agent_worker, "requeue_task", _fake_requeue)
-    monkeypatch.setattr(agent_worker, "ROLE_AGENTS", {"resource_finder": _CountAgent()})
-
-    worker = agent_worker.AgentWorker()
-    await worker._execute_task("r5", {"agent_role": "resource_finder", "trigger_type": "mention"})
-
-    assert called["count"] == 0
-    assert requeued == []
 
 
 @pytest.mark.asyncio

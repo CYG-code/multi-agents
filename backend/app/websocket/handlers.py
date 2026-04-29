@@ -199,6 +199,20 @@ async def _first_cooling_mention_role(room_id: str, mentions: list[str] | None) 
     return None
 
 
+async def _cooldown_remaining_seconds(room_id: str, role: str) -> int:
+    try:
+        redis_client = get_redis_client()
+    except RuntimeError:
+        return 1
+    try:
+        ttl = await redis_client.ttl(f"cooldown:{room_id}:{role}")
+        if isinstance(ttl, int) and ttl > 0:
+            return ttl
+    except Exception:
+        pass
+    return 1
+
+
 async def handle_chat_message(
     data: dict,
     room_id: str,
@@ -217,13 +231,14 @@ async def handle_chat_message(
         return
     cooling_role = await _first_cooling_mention_role(room_id, mentions)
     if cooling_role:
+        remaining_seconds = await _cooldown_remaining_seconds(room_id, cooling_role)
         if websocket is not None:
             await websocket.send_json(
                 {
                     "type": "agent:mention_blocked",
                     "reason": "agent_cooling",
                     "agent_role": cooling_role,
-                    "message": "当前智能体正在冷却中，请稍后再试。",
+                    "message": f"???????????? {remaining_seconds} ?????",
                 }
             )
         return
@@ -235,7 +250,7 @@ async def handle_chat_message(
                 {
                     "type": "agent:mention_blocked",
                     "reason": "agent_busy",
-                    "message": "当前有智能体正在排队或发言，请稍后再 @ 调用。",
+                    "message": "?????????????????? @ ???",
                 }
             )
         return
