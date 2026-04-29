@@ -1,5 +1,5 @@
 timing:
-  silence_trigger_enabled: false
+  silence_trigger_enabled: true
   silence_threshold_seconds: 120
   analysis_interval_minutes: 5
   warmup_minutes: 3
@@ -39,11 +39,11 @@ mention:
   max_mentions_per_message: 1
 
 auto_speak:
-  facilitator_silence_enabled: false
-  time_progress_enabled: false
-  committee_enabled: false
+  facilitator_silence_enabled: true
+  time_progress_enabled: true
+  committee_enabled: true
   committee_recent_same_role_window: 2
-  monopoly_encourager_enabled: false
-  committee_devil_advocate_enabled: false
-  committee_summarizer_enabled: false
-  committee_encourager_enabled: false
+  monopoly_encourager_enabled: true
+  committee_devil_advocate_enabled: true
+  committee_summarizer_enabled: true
+  committee_encourager_enabled: true
