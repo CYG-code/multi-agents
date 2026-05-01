@@ -5,6 +5,13 @@ const ROOM_COUNT = Math.min(Number(process.env.WS_ROOM_COUNT || 10), 50)
 const STUDENTS_PER_ROOM = Number(process.env.WS_STUDENTS_PER_ROOM || 3)
 const DURATION_MS = Number(process.env.WS_DURATION_MS || 60000)
 const MESSAGE_INTERVAL_MS = Number(process.env.WS_MESSAGE_INTERVAL_MS || 15000)
+const MESSAGE_JITTER_MS = Number(process.env.WS_MESSAGE_JITTER_MS || 0)
+const MESSAGE_START_STAGGER_MS = Number(process.env.WS_MESSAGE_START_STAGGER_MS || 0)
+const MESSAGE_MAX_IN_FLIGHT_PER_CONNECTION = Number(process.env.WS_MESSAGE_MAX_IN_FLIGHT_PER_CONNECTION || 1)
+const MESSAGE_BURST = Number(process.env.WS_MESSAGE_BURST || 1)
+const MESSAGE_CONTENT_SIZE = Number(process.env.WS_MESSAGE_CONTENT_SIZE || 50)
+const WS_EXPECT_BROADCAST = String(process.env.WS_EXPECT_BROADCAST || 'true').toLowerCase() === 'true'
+const WS_MESSAGE_TEST_MODE = process.env.WS_MESSAGE_TEST_MODE || 'normal_chat'
 const BASE_URL = (process.env.BASE_URL || 'http://localhost:5173').replace(/\/$/, '')
 const API_BASE_URL = (process.env.API_BASE_URL || 'http://localhost:8001/api').replace(/\/$/, '')
 const RAW_WS_BASE_URL = (process.env.WS_BASE_URL || 'ws://localhost:8001').replace(/\/$/, '')
@@ -56,6 +63,17 @@ const stats = {
   connectionDetails: [],
   lifetimeBuckets: { lt1s: 0, s1to5: 0, s5to10: 0, gte10: 0 },
   closeSecondBucket: {},
+  messageSentSecondBucket: {},
+  messageBroadcastSeenSecondBucket: {},
+  messagesSent: 0,
+  messagesBroadcastSeen: 0,
+  messageLatencies: [],
+  sentMessageIds: new Set(),
+  seenMessageIds: new Set(),
+  messageTracking: {},
+  closeAround45: [],
+  failedRoomIds: new Set(),
+  failedUsernames: new Set(),
 }
 
 function percentile(arr, p) {
@@ -67,6 +85,17 @@ function percentile(arr, p) {
 
 function now() {
   return Date.now()
+}
+
+function jitterDelay(maxMs) {
+  if (!maxMs || maxMs <= 0) return 0
+  return Math.floor(Math.random() * (maxMs + 1))
+}
+
+function buildMessageContent(base) {
+  if (base.length >= MESSAGE_CONTENT_SIZE) return base
+  const filler = 'x'.repeat(Math.max(0, MESSAGE_CONTENT_SIZE - base.length))
+  return `${base}${filler}`
 }
 
 function toWsUrl(baseUrl, roomId) {
@@ -272,11 +301,26 @@ function analyzePatterns(startTs, endTs) {
   const maxPerSecond = Object.values(bucket).reduce((m, v) => Math.max(m, v), 0)
   stats.concentratedDisconnect = maxPerSecond >= Math.max(5, Math.floor(stats.targetConnections * 0.25))
 
+  const messageIdsNear45 = Object.entries(stats.messageTracking)
+    .filter(([, v]) => {
+      const sec = Math.floor((v.sendAt - startTs) / 1000)
+      return sec >= 35 && sec <= 55
+    })
+    .map(([id, v]) => ({
+      messageId: id,
+      roomId: v.roomId,
+      username: v.username,
+      sendAtSec: Math.floor((v.sendAt - startTs) / 1000),
+      seenAtSec: v.seenAt ? Math.floor((v.seenAt - startTs) / 1000) : null,
+      seenCount: v.seenCount,
+    }))
+
   return {
     durationMs: endTs - startTs,
     openEvents: stats.events.filter((e) => e.type === 'open').length,
     closeEvents: closeEvents.length,
     maxClosePerSecond: maxPerSecond,
+    messageIdsNear45Sample: messageIdsNear45.slice(0, 60),
   }
 }
 
@@ -287,6 +331,14 @@ function printSummary(extra, setupMeta) {
   const max = stats.lifetimes.length ? Math.max(...stats.lifetimes) : 0
   const openRate = stats.targetConnections ? stats.openCount / stats.targetConnections : 0
   const code1006Rate = stats.targetConnections ? stats.code1006 / stats.targetConnections : 0
+  const aliveAtEnd = Object.values(stats.roomConnectionCount).reduce((sum, item) => sum + (item.openAliveAtEnd || 0), 0)
+  const aliveAfter5s = stats.connectionDetails.filter((d) => d.aliveAfter5s).length
+  const aliveAfter10s = stats.connectionDetails.filter((d) => d.aliveAfter10s).length
+  const messageSuccessRate = stats.messagesSent ? stats.messagesBroadcastSeen / stats.messagesSent : 0
+  const latencyP50 = percentile(stats.messageLatencies, 50)
+  const latencyP95 = percentile(stats.messageLatencies, 95)
+  const latencyP99 = percentile(stats.messageLatencies, 99)
+  const latencyMax = stats.messageLatencies.length ? Math.max(...stats.messageLatencies) : 0
 
   const roomHealth = Object.fromEntries(Object.entries(stats.roomConnectionCount).map(([roomId, v]) => [roomId, v.openAliveAtEnd]))
   const allRoomsHaveSurvivor = Object.values(roomHealth).every((v) => v >= 1)
@@ -313,6 +365,9 @@ function printSummary(extra, setupMeta) {
     openRate,
     authSentCount: stats.authSentCount,
     firstMessageReceivedCount: stats.firstMessageReceivedCount,
+    aliveAfter5s,
+    aliveAfter10s,
+    aliveAtEnd,
     closeCount: stats.closeCount,
     closeCodeDist: stats.closeCodeDist,
     authCloseCounts: stats.authCloseCounts,
@@ -322,7 +377,13 @@ function printSummary(extra, setupMeta) {
     byRoomId: stats.roomConnectionCount,
     byUsernameCloseCodeDist: stats.perUsernameCloseCodeDist,
     byCloseSecondBucket: stats.closeSecondBucket,
+    byMessageSentSecondBucket: stats.messageSentSecondBucket,
+    byMessageBroadcastSeenSecondBucket: stats.messageBroadcastSeenSecondBucket,
     byLifetimeBucket: stats.lifetimeBuckets,
+    messagesSent: stats.messagesSent,
+    messagesBroadcastSeen: stats.messagesBroadcastSeen,
+    messageBroadcastSuccessRate: messageSuccessRate,
+    messageLatencyMs: { p50: latencyP50, p95: latencyP95, p99: latencyP99, max: latencyMax },
     lifetimeMs: { p50, p95, min, max },
     concentratedDisconnect: stats.concentratedDisconnect,
     fourSecondPattern: stats.fourSecondPattern,
@@ -336,6 +397,9 @@ function printSummary(extra, setupMeta) {
     perUsernameUseCount: stats.perUsernameUseCount,
     roomStudentAssignments: stats.roomStudentAssignments,
     connectionDetailsSample: stats.connectionDetails.slice(0, 20),
+    closeAround45Sample: stats.closeAround45.slice(0, 30),
+    failedRoomIds: [...stats.failedRoomIds],
+    failedUsernames: [...stats.failedUsernames],
     extra,
     result: pass ? 'PASS' : 'FAIL',
   })
@@ -393,6 +457,13 @@ async function main() {
     STUDENTS_PER_ROOM,
     DURATION_MS,
     MESSAGE_INTERVAL_MS,
+    MESSAGE_JITTER_MS,
+    MESSAGE_START_STAGGER_MS,
+    MESSAGE_MAX_IN_FLIGHT_PER_CONNECTION,
+    MESSAGE_BURST,
+    MESSAGE_CONTENT_SIZE,
+    WS_EXPECT_BROADCAST,
+    WS_MESSAGE_TEST_MODE,
     BASE_URL,
     API_BASE_URL,
     WS_BASE_URL,
@@ -497,6 +568,7 @@ async function main() {
         openAt: null,
         authSentAt: null,
         firstMessageAt: null,
+        lastMessageAt: null,
         closeAt: null,
         closeCode: null,
         closeReason: '',
@@ -518,6 +590,9 @@ async function main() {
         timer: null,
         alive5Handle: null,
         alive10Handle: null,
+        seq: 0,
+        inFlight: 0,
+        messageStartHandle: null,
       }
 
       const connect = () => {
@@ -536,24 +611,73 @@ async function main() {
           detail.authSentAt = now()
           stats.authSentCount += 1
 
-          if (MESSAGE_INTERVAL_MS > 0) {
+          const sendPresenceAndMessages = () => {
+            if (!conn.ws || conn.ws.readyState !== WebSocket.OPEN) return
+            const sendTs = now()
+            const sec = closeSecond(startTs, sendTs)
+            const presencePayload = JSON.stringify({ type: 'presence:ping', ts: sendTs, room_id: roomId })
+            conn.ws.send(presencePayload)
+
+            if (!WS_SEND_MESSAGES) return
+            if (conn.inFlight >= MESSAGE_MAX_IN_FLIGHT_PER_CONNECTION) return
+            for (let burst = 0; burst < MESSAGE_BURST; burst += 1) {
+              if (conn.inFlight >= MESSAGE_MAX_IN_FLIGHT_PER_CONNECTION) break
+              conn.seq += 1
+              const messageId = `loadmsg:${roomId}:${studentUsername}:${conn.seq}:${now()}`
+              const content = buildMessageContent(`${messageId} mode=${WS_MESSAGE_TEST_MODE}`)
+              const payload = JSON.stringify({
+                type: 'chat:message',
+                content,
+                mentions: [],
+              })
+              conn.ws.send(payload)
+              conn.inFlight += 1
+              stats.messagesSent += 1
+              stats.sentMessageIds.add(messageId)
+              stats.messageSentSecondBucket[sec] = (stats.messageSentSecondBucket[sec] || 0) + 1
+              stats.messageTracking[messageId] = {
+                roomId,
+                username: studentUsername,
+                connectionId: connId,
+                sendAt: now(),
+                seenAt: null,
+                seenCount: 0,
+              }
+            }
+          }
+
+          const scheduleTicker = () => {
             conn.timer = trackInterval(
               setInterval(() => {
-                if (conn.ws && conn.ws.readyState === WebSocket.OPEN) {
-                  const presencePayload = JSON.stringify({ type: 'presence:ping', ts: now(), room_id: roomId })
-                  conn.ws.send(presencePayload)
-                  if (WS_SEND_MESSAGES) {
-                    conn.ws.send(
-                      JSON.stringify({
-                        type: 'chat:message',
-                        room_id: roomId,
-                        content: `ws-load probe ${studentUsername} ${now()}`,
-                      })
-                    )
-                  }
+                const run = () => sendPresenceAndMessages()
+                const jitter = jitterDelay(MESSAGE_JITTER_MS)
+                if (jitter > 0) {
+                  const h = trackTimeout(
+                    setTimeout(() => {
+                      clearTrackedTimeout(h)
+                      run()
+                    }, jitter)
+                  )
+                } else {
+                  run()
                 }
               }, MESSAGE_INTERVAL_MS)
             )
+          }
+
+          const startStagger = jitterDelay(MESSAGE_START_STAGGER_MS)
+          if (startStagger > 0) {
+            conn.messageStartHandle = trackTimeout(
+              setTimeout(() => {
+                clearTrackedTimeout(conn.messageStartHandle)
+                conn.messageStartHandle = null
+                sendPresenceAndMessages()
+                if (MESSAGE_INTERVAL_MS > 0) scheduleTicker()
+              }, startStagger)
+            )
+          } else {
+            sendPresenceAndMessages()
+            if (MESSAGE_INTERVAL_MS > 0) scheduleTicker()
           }
 
           conn.alive5Handle = trackTimeout(
@@ -572,12 +696,39 @@ async function main() {
         })
 
         conn.ws.on('message', (raw) => {
+          const recvTs = now()
           if (!detail.firstMessageAt) {
-            detail.firstMessageAt = now()
+            detail.firstMessageAt = recvTs
             stats.firstMessageReceivedCount += 1
           }
+          detail.lastMessageAt = recvTs
           const text = String(raw || '')
-          stats.events.push({ type: 'message', ts: now(), roomId, connId, sample: text.slice(0, 80) })
+          const sec = closeSecond(startTs, recvTs)
+          let payload = null
+          try {
+            payload = JSON.parse(text)
+          } catch {
+            payload = null
+          }
+          if (payload && payload.type === 'chat:new_message' && typeof payload.content === 'string' && payload.content.includes('loadmsg:')) {
+            const match = payload.content.match(/loadmsg:[^\s]+/)
+            const messageId = match ? match[0] : null
+            if (messageId && stats.messageTracking[messageId]) {
+              const entry = stats.messageTracking[messageId]
+              entry.seenCount += 1
+              if (!entry.seenAt) {
+                entry.seenAt = recvTs
+                const latency = recvTs - entry.sendAt
+                stats.messageLatencies.push(latency)
+                stats.messagesBroadcastSeen += 1
+                stats.seenMessageIds.add(messageId)
+                stats.messageBroadcastSeenSecondBucket[sec] = (stats.messageBroadcastSeenSecondBucket[sec] || 0) + 1
+              }
+              entry.lastSeenByConnectionAt = recvTs
+              if (conn.inFlight > 0) conn.inFlight -= 1
+            }
+          }
+          stats.events.push({ type: 'message', ts: recvTs, roomId, connId, sample: text.slice(0, 120) })
         })
 
         conn.ws.on('close', (code, reasonBuffer) => {
@@ -592,9 +743,11 @@ async function main() {
           }
 
           clearTrackedInterval(conn.timer)
+          clearTrackedTimeout(conn.messageStartHandle)
           clearTrackedTimeout(conn.alive5Handle)
           clearTrackedTimeout(conn.alive10Handle)
           conn.timer = null
+          conn.messageStartHandle = null
           conn.alive5Handle = null
           conn.alive10Handle = null
           if (conn.ws) runtime.sockets.delete(conn.ws)
@@ -610,6 +763,20 @@ async function main() {
 
           const sec = closeSecond(startTs, closeTs)
           stats.closeSecondBucket[sec] = (stats.closeSecondBucket[sec] || 0) + 1
+          if (detail.closeCode === 1006) {
+            stats.failedRoomIds.add(roomId)
+            stats.failedUsernames.add(studentUsername)
+          }
+          if (sec >= 40 && sec <= 50) {
+            stats.closeAround45.push({
+              roomId,
+              username: studentUsername,
+              connectionId: connId,
+              sec,
+              closeCode: detail.closeCode,
+              lastMessageAt: detail.lastMessageAt,
+            })
+          }
 
           stats.events.push({ type: 'close', ts: closeTs, roomId, connId, code: detail.closeCode, reason: detail.closeReason })
 
@@ -650,6 +817,7 @@ async function main() {
       }
     }
     clearTrackedInterval(conn.timer)
+    clearTrackedTimeout(conn.messageStartHandle)
     clearTrackedTimeout(conn.alive5Handle)
     clearTrackedTimeout(conn.alive10Handle)
     conn.timer = null

@@ -1,6 +1,7 @@
 ﻿import asyncio
 import json
 import os
+import time
 import traceback
 from datetime import datetime, timezone
 
@@ -194,16 +195,26 @@ class ConnectionManager:
 
     async def broadcast_to_room(self, room_id: str, data: dict) -> None:
         redis_client = get_redis_client()
+        started = time.perf_counter()
+        room_conn_count = len(self._rooms.get(room_id, []))
         _manager_log(
             "broadcast_publish_start",
             room_id=room_id,
-            extra={"payload_type": data.get("type"), "rooms_count": len(self._rooms)},
+            extra={
+                "payload_type": data.get("type"),
+                "rooms_count": len(self._rooms),
+                "room_conn_count": room_conn_count,
+            },
         )
         await redis_client.publish(f"room:{room_id}", json.dumps(data, ensure_ascii=False))
         _manager_log(
             "broadcast_publish_done",
             room_id=room_id,
-            extra={"payload_type": data.get("type")},
+            extra={
+                "payload_type": data.get("type"),
+                "room_conn_count": room_conn_count,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            },
         )
 
     async def _redis_subscriber(self, room_id: str) -> None:
@@ -218,19 +229,41 @@ class ConnectionManager:
                     continue
 
                 data = json.loads(message["data"])
+                _manager_log(
+                    "redis_subscriber_message_received",
+                    room_id=room_id,
+                    extra={
+                        "payload_type": data.get("type"),
+                        "room_conn_count": len(self._rooms.get(room_id, [])),
+                    },
+                )
                 if room_id not in self._rooms:
                     continue
 
                 for conn in list(self._rooms[room_id]):
+                    send_started = time.perf_counter()
                     try:
                         _manager_log(
                             "send_json_start",
                             room_id=room_id,
                             user_id=conn.get("user_id"),
                             session_jti=conn.get("session_jti"),
-                            extra={"payload_type": data.get("type")},
+                            extra={
+                                "payload_type": data.get("type"),
+                                "room_conn_count": len(self._rooms.get(room_id, [])),
+                            },
                         )
                         await conn["ws"].send_json(data)
+                        _manager_log(
+                            "send_json_done",
+                            room_id=room_id,
+                            user_id=conn.get("user_id"),
+                            session_jti=conn.get("session_jti"),
+                            extra={
+                                "payload_type": data.get("type"),
+                                "duration_ms": round((time.perf_counter() - send_started) * 1000, 3),
+                            },
+                        )
                     except Exception as exc:
                         _manager_log(
                             "send_json_error",
@@ -241,6 +274,7 @@ class ConnectionManager:
                                 "payload_type": data.get("type"),
                                 "exception_class": type(exc).__name__,
                                 "exception_message": str(exc),
+                                "duration_ms": round((time.perf_counter() - send_started) * 1000, 3),
                                 "traceback": traceback.format_exc(limit=3),
                             },
                         )

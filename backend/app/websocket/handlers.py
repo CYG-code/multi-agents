@@ -259,11 +259,50 @@ async def handle_chat_message(
     user: User,
     db: AsyncSession,
     websocket: WebSocket | None = None,
+    connection_id: str | None = None,
+    session_jti: str | None = None,
 ) -> None:
+    chat_started = time.perf_counter()
+    raw_content = str(data.get("content") or "")
+    loadmsg_id = None
+    if "loadmsg:" in raw_content:
+        loadmsg_id = raw_content.split()[0]
+    log_ws_debug(
+        "chat_message_received",
+        room_id,
+        connection_id or "unknown",
+        user_id=str(user.id),
+        username=user.display_name,
+        session_jti=session_jti,
+        extra={"loadmsg_id": loadmsg_id},
+    )
     try:
         frame = ChatMessageFrame.model_validate(data)
     except ValidationError:
+        log_ws_debug(
+            "chat_message_error",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={
+                "loadmsg_id": loadmsg_id,
+                "stage": "chat_frame_validated",
+                "error": "validation_error",
+                "duration_ms": round((time.perf_counter() - chat_started) * 1000, 3),
+            },
+        )
         return
+    log_ws_debug(
+        "chat_frame_validated",
+        room_id,
+        connection_id or "unknown",
+        user_id=str(user.id),
+        username=user.display_name,
+        session_jti=session_jti,
+        extra={"loadmsg_id": loadmsg_id, "duration_ms": round((time.perf_counter() - chat_started) * 1000, 3)},
+    )
 
     content = frame.content.strip()
     mentions = frame.mentions
@@ -295,37 +334,169 @@ async def handle_chat_message(
             )
         return
 
-    msg = await MessageService.save_student_message(db, room_id, str(user.id), content, mentions)
-
     try:
-        redis_client = get_redis_client()
-    except RuntimeError:
-        redis_client = None
+        save_started = time.perf_counter()
+        log_ws_debug(
+            "save_student_message_start",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id},
+        )
+        msg = await MessageService.save_student_message(
+            db,
+            room_id,
+            str(user.id),
+            content,
+            mentions,
+            connection_id=connection_id,
+            loadmsg_id=loadmsg_id,
+        )
+        log_ws_debug(
+            "save_student_message_done",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id, "duration_ms": round((time.perf_counter() - save_started) * 1000, 3)},
+        )
 
-    now_ts = msg.created_at.timestamp() if msg.created_at else None
-    if redis_client is not None and now_ts is not None:
-        await redis_client.set(f"room:{room_id}:last_msg_time", now_ts)
-        await redis_client.set(f"room:{room_id}:last_activity_time", now_ts)
-        await redis_client.setnx(f"room:{room_id}:start_time", now_ts)
-        await redis_client.sadd("active_rooms", room_id)
-    await _touch_online_presence_best_effort(room_id, str(user.id))
+        try:
+            redis_client = get_redis_client()
+        except RuntimeError:
+            redis_client = None
 
-    await manager.broadcast_to_room(
-        room_id,
-        {
-            "type": "chat:new_message",
-            "id": str(msg.id),
-            "seq_num": msg.seq_num,
-            "sender_type": "student",
-            "sender_id": str(user.id),
-            "display_name": user.display_name,
-            "content": msg.content,
-            "created_at": msg.created_at.isoformat() if msg.created_at else None,
-        },
-    )
+        now_ts = msg.created_at.timestamp() if msg.created_at else None
+        if redis_client is not None and now_ts is not None:
+            redis_activity_started = time.perf_counter()
+            log_ws_debug(
+                "redis_room_activity_update_start",
+                room_id,
+                connection_id or "unknown",
+                user_id=str(user.id),
+                username=user.display_name,
+                session_jti=session_jti,
+                extra={"loadmsg_id": loadmsg_id},
+            )
+            await redis_client.set(f"room:{room_id}:last_msg_time", now_ts)
+            await redis_client.set(f"room:{room_id}:last_activity_time", now_ts)
+            await redis_client.setnx(f"room:{room_id}:start_time", now_ts)
+            await redis_client.sadd("active_rooms", room_id)
+            log_ws_debug(
+                "redis_room_activity_update_done",
+                room_id,
+                connection_id or "unknown",
+                user_id=str(user.id),
+                username=user.display_name,
+                session_jti=session_jti,
+                extra={"loadmsg_id": loadmsg_id, "duration_ms": round((time.perf_counter() - redis_activity_started) * 1000, 3)},
+            )
+        await _touch_online_presence_best_effort(room_id, str(user.id))
 
-    await trigger_detector.check_monopoly(room_id, str(user.id))
-    await _trigger_mentions(room_id, str(msg.id), user, mentions)
+        broadcast_started = time.perf_counter()
+        log_ws_debug(
+            "broadcast_chat_new_message_start",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id},
+        )
+        await manager.broadcast_to_room(
+            room_id,
+            {
+                "type": "chat:new_message",
+                "id": str(msg.id),
+                "seq_num": msg.seq_num,
+                "sender_type": "student",
+                "sender_id": str(user.id),
+                "display_name": user.display_name,
+                "content": msg.content,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            },
+        )
+        log_ws_debug(
+            "broadcast_chat_new_message_done",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id, "duration_ms": round((time.perf_counter() - broadcast_started) * 1000, 3)},
+        )
+
+        monopoly_started = time.perf_counter()
+        log_ws_debug(
+            "trigger_monopoly_start",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id},
+        )
+        await trigger_detector.check_monopoly(room_id, str(user.id))
+        log_ws_debug(
+            "trigger_monopoly_done",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id, "duration_ms": round((time.perf_counter() - monopoly_started) * 1000, 3)},
+        )
+
+        mention_started = time.perf_counter()
+        log_ws_debug(
+            "trigger_mentions_start",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id},
+        )
+        await _trigger_mentions(room_id, str(msg.id), user, mentions)
+        log_ws_debug(
+            "trigger_mentions_done",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id, "duration_ms": round((time.perf_counter() - mention_started) * 1000, 3)},
+        )
+        log_ws_debug(
+            "chat_message_done",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"loadmsg_id": loadmsg_id, "duration_ms": round((time.perf_counter() - chat_started) * 1000, 3)},
+        )
+    except Exception as exc:
+        log_ws_debug(
+            "chat_message_error",
+            room_id,
+            connection_id or "unknown",
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={
+                "loadmsg_id": loadmsg_id,
+                "stage": "chat_pipeline",
+                "exception_class": type(exc).__name__,
+                "exception_message": str(exc),
+                "duration_ms": round((time.perf_counter() - chat_started) * 1000, 3),
+                "traceback": traceback.format_exc(limit=3),
+            },
+        )
+        raise
 
 
 async def handle_writing_update(websocket: WebSocket, data: dict, room_id: str, user: User) -> None:
@@ -574,7 +745,15 @@ async def websocket_endpoint(
                     extra={"stage": "chat_message"},
                 )
                 async with AsyncSessionLocal() as db:
-                    await handle_chat_message(data, room_id, user, db, websocket=websocket)
+                    await handle_chat_message(
+                        data,
+                        room_id,
+                        user,
+                        db,
+                        websocket=websocket,
+                        connection_id=connection_id,
+                        session_jti=session_jti,
+                    )
                 log_ws_debug(
                     "db_session_closed",
                     room_id,
