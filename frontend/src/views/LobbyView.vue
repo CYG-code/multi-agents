@@ -505,13 +505,6 @@ function timerActionText(room) {
 async function handleTimerAction(room) {
   if (!room?.id || timerStartingRoomId.value) return
   const shouldStart = roomPhase(room) === 'not_started'
-  if (shouldStart) {
-    const studentCount = Number(room?.student_count ?? 0)
-    if (studentCount < 3) {
-      alert(TXT.startTimerNeedThreeStudents)
-      return
-    }
-  }
   const confirmed = window.confirm(shouldStart ? TXT.startTimerConfirm : TXT.resetTimerConfirm)
   if (!confirmed) return
 
@@ -771,3 +764,4 @@ async function deleteEditingTemplate() {
   }
 }
 </script>
+

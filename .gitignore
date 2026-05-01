@@ -28,3 +28,5 @@ dist/
 
 # AI Agent 临时沙箱
 .ai_scratch/
+
+frontend/test-results/
