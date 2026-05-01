@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
+import random
 import time
+import traceback
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import Depends, WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect
 from jose import JWTError
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -24,7 +27,7 @@ from app.agents.settings import get_agent_settings
 from app.analysis.triggers import trigger_detector
 from app.db.redis_client import get_redis_client, touch_online_presence
 from app.db.redis_client import get_user_active_session_jti
-from app.db.session import get_db
+from app.db.session import AsyncSessionLocal
 from app.models.room_member import RoomMember
 from app.models.user import User
 from app.schemas.message import ChatMessageFrame
@@ -32,6 +35,43 @@ from app.services.auth_service import decode_access_token
 from app.services.message_service import MessageService
 from app.services import writing_doc_service
 from app.websocket.manager import manager
+
+WS_DEBUG_LOG = os.getenv("WS_DEBUG_LOG", "").lower() == "true"
+
+
+def _short_jti(session_jti: str | None) -> str | None:
+    if not session_jti:
+        return None
+    return str(session_jti)[:8]
+
+
+def _new_connection_id() -> str:
+    return f"ws-{int(time.time() * 1000) % 10000000}-{random.randint(1000, 9999)}"
+
+
+def log_ws_debug(
+    event: str,
+    room_id: str,
+    connection_id: str,
+    user_id: str | None = None,
+    username: str | None = None,
+    session_jti: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    if not WS_DEBUG_LOG:
+        return
+    payload = {
+        "event": event,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "room_id": room_id,
+        "connection_id": connection_id,
+        "user_id": user_id,
+        "username": username,
+        "session_jti": _short_jti(session_jti),
+    }
+    if extra:
+        payload["extra"] = extra
+    print("[WS-DEBUG]", payload, flush=True)
 
 
 async def verify_token(token: str | None, db: AsyncSession) -> tuple[User, str] | None:
@@ -353,15 +393,36 @@ async def handle_writing_awareness(data: dict, room_id: str, user: User) -> None
 async def websocket_endpoint(
     websocket: WebSocket,
     room_id: str,
-    db: AsyncSession = Depends(get_db),
 ) -> None:
-    await websocket.accept()
+    connection_id = _new_connection_id()
+    user: User | None = None
+    session_jti: str | None = None
+    redis_client = None
+    manager_connected = False
 
+    log_ws_debug("ws_accept_start", room_id, connection_id)
+    await websocket.accept()
+    log_ws_debug("ws_accept_done", room_id, connection_id)
+
+    log_ws_debug("auth_frame_wait_start", room_id, connection_id)
     try:
         auth_data = await websocket.receive_json()
+        log_ws_debug("auth_frame_received", room_id, connection_id, extra={"frame_type": auth_data.get("type")})
     except WebSocketDisconnect:
+        log_ws_debug("websocket_disconnect", room_id, connection_id, extra={"stage": "auth_frame_wait"})
         return
-    except Exception:
+    except Exception as exc:
+        log_ws_debug(
+            "unexpected_exception",
+            room_id,
+            connection_id,
+            extra={
+                "stage": "auth_frame_wait",
+                "exception_class": type(exc).__name__,
+                "exception_message": str(exc),
+                "traceback": traceback.format_exc(limit=3),
+            },
+        )
         try:
             await websocket.close(code=4002, reason="Auth timeout")
         except RuntimeError:
@@ -370,31 +431,96 @@ async def websocket_endpoint(
         return
 
     if auth_data.get("type") != "auth":
+        log_ws_debug("auth_token_invalid", room_id, connection_id, extra={"reason": "first_frame_not_auth"})
         try:
             await websocket.close(code=4001, reason="First frame must be auth")
         except RuntimeError:
             pass
         return
 
-    verified = await verify_token(auth_data.get("token", ""), db)
-    if not verified:
-        try:
-            await websocket.close(code=4001, reason="Invalid token")
-        except RuntimeError:
-            pass
-        return
-    user, session_jti = verified
+    log_ws_debug("auth_token_verify_start", room_id, connection_id)
+    log_ws_debug("db_session_open", room_id, connection_id, extra={"stage": "auth"})
+    async with AsyncSessionLocal() as db:
+        verified = await verify_token(auth_data.get("token", ""), db)
+        if not verified:
+            log_ws_debug("db_session_closed", room_id, connection_id, extra={"stage": "auth"})
+            log_ws_debug("auth_token_invalid", room_id, connection_id, extra={"reason": "token_verify_failed"})
+            try:
+                await websocket.close(code=4001, reason="Invalid token")
+            except RuntimeError:
+                pass
+            return
+        user, session_jti = verified
+        log_ws_debug(
+            "auth_token_verified",
+            room_id,
+            connection_id,
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+        )
 
-    if not await is_room_member(user.id, room_id, db):
-        try:
-            await websocket.close(code=4003, reason="Not a room member")
-        except RuntimeError:
-            pass
-        return
+        log_ws_debug(
+            "room_member_check_start",
+            room_id,
+            connection_id,
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+        )
+        if not await is_room_member(user.id, room_id, db):
+            log_ws_debug("db_session_closed", room_id, connection_id, extra={"stage": "auth"})
+            log_ws_debug(
+                "room_member_forbidden",
+                room_id,
+                connection_id,
+                user_id=str(user.id),
+                username=user.display_name,
+                session_jti=session_jti,
+            )
+            try:
+                await websocket.close(code=4003, reason="Not a room member")
+            except RuntimeError:
+                pass
+            return
+    log_ws_debug("db_session_closed", room_id, connection_id, extra={"stage": "auth"})
+    log_ws_debug(
+        "room_member_checked",
+        room_id,
+        connection_id,
+        user_id=str(user.id),
+        username=user.display_name,
+        session_jti=session_jti,
+    )
 
+    log_ws_debug(
+        "manager_connect_start",
+        room_id,
+        connection_id,
+        user_id=str(user.id),
+        username=user.display_name,
+        session_jti=session_jti,
+    )
     await manager.connect(websocket, room_id, user, session_jti=session_jti)
+    manager_connected = True
+    log_ws_debug(
+        "manager_connect_done",
+        room_id,
+        connection_id,
+        user_id=str(user.id),
+        username=user.display_name,
+        session_jti=session_jti,
+    )
 
     redis_client = get_redis_client()
+    log_ws_debug(
+        "room_user_join_broadcast_start",
+        room_id,
+        connection_id,
+        user_id=str(user.id),
+        username=user.display_name,
+        session_jti=session_jti,
+    )
     online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
     await manager.broadcast_to_room(
         room_id,
@@ -405,15 +531,59 @@ async def websocket_endpoint(
             "online_count": online_count,
         },
     )
+    log_ws_debug(
+        "room_user_join_broadcast_done",
+        room_id,
+        connection_id,
+        user_id=str(user.id),
+        username=user.display_name,
+        session_jti=session_jti,
+        extra={"online_count": online_count},
+    )
 
     try:
+        log_ws_debug(
+            "receive_loop_start",
+            room_id,
+            connection_id,
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+        )
         while True:
             data = await websocket.receive_json()
             if data.get("type") == "presence:ping":
+                log_ws_debug(
+                    "presence_ping_received",
+                    room_id,
+                    connection_id,
+                    user_id=str(user.id),
+                    username=user.display_name,
+                    session_jti=session_jti,
+                )
                 await _touch_online_presence_best_effort(room_id, str(user.id))
                 continue
             if data.get("type") == "chat:message":
-                await handle_chat_message(data, room_id, user, db, websocket=websocket)
+                log_ws_debug(
+                    "db_session_open",
+                    room_id,
+                    connection_id,
+                    user_id=str(user.id),
+                    username=user.display_name,
+                    session_jti=session_jti,
+                    extra={"stage": "chat_message"},
+                )
+                async with AsyncSessionLocal() as db:
+                    await handle_chat_message(data, room_id, user, db, websocket=websocket)
+                log_ws_debug(
+                    "db_session_closed",
+                    room_id,
+                    connection_id,
+                    user_id=str(user.id),
+                    username=user.display_name,
+                    session_jti=session_jti,
+                    extra={"stage": "chat_message"},
+                )
                 continue
             if data.get("type") == "writing:update":
                 await handle_writing_update(websocket, data, room_id, user)
@@ -421,29 +591,105 @@ async def websocket_endpoint(
             if data.get("type") == "writing:awareness":
                 await handle_writing_awareness(data, room_id, user)
     except WebSocketDisconnect:
-        await manager.disconnect(websocket, room_id, str(user.id), session_jti=session_jti)
-        online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
-        await manager.broadcast_to_room(
+        log_ws_debug(
+            "websocket_disconnect",
             room_id,
-            {
-                "type": "room:user_leave",
-                "user_id": str(user.id),
-                "display_name": user.display_name,
-                "online_count": online_count,
-            },
+            connection_id,
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={"stage": "receive_loop"},
         )
     except RuntimeError as exc:
         # Starlette may raise RuntimeError instead of WebSocketDisconnect on closed sockets.
         if "WebSocket is not connected" not in str(exc):
+            log_ws_debug(
+                "runtime_error",
+                room_id,
+                connection_id,
+                user_id=str(user.id) if user else None,
+                username=user.display_name if user else None,
+                session_jti=session_jti,
+                extra={
+                    "exception_class": type(exc).__name__,
+                    "exception_message": str(exc),
+                    "traceback": traceback.format_exc(limit=3),
+                },
+            )
             raise
-        await manager.disconnect(websocket, room_id, str(user.id), session_jti=session_jti)
-        online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
-        await manager.broadcast_to_room(
+        log_ws_debug(
+            "runtime_error",
             room_id,
-            {
-                "type": "room:user_leave",
-                "user_id": str(user.id),
-                "display_name": user.display_name,
-                "online_count": online_count,
+            connection_id,
+            user_id=str(user.id),
+            username=user.display_name,
+            session_jti=session_jti,
+            extra={
+                "exception_class": type(exc).__name__,
+                "exception_message": str(exc),
+                "traceback": traceback.format_exc(limit=3),
             },
         )
+    except Exception as exc:
+        log_ws_debug(
+            "unexpected_exception",
+            room_id,
+            connection_id,
+            user_id=str(user.id) if user else None,
+            username=user.display_name if user else None,
+            session_jti=session_jti,
+            extra={
+                "exception_class": type(exc).__name__,
+                "exception_message": str(exc),
+                "traceback": traceback.format_exc(limit=3),
+            },
+        )
+        raise
+    finally:
+        if user and manager_connected:
+            log_ws_debug(
+                "manager_disconnect_start",
+                room_id,
+                connection_id,
+                user_id=str(user.id),
+                username=user.display_name,
+                session_jti=session_jti,
+            )
+            await manager.disconnect(websocket, room_id, str(user.id), session_jti=session_jti)
+            log_ws_debug(
+                "manager_disconnect_done",
+                room_id,
+                connection_id,
+                user_id=str(user.id),
+                username=user.display_name,
+                session_jti=session_jti,
+            )
+            if redis_client is None:
+                redis_client = get_redis_client()
+            log_ws_debug(
+                "room_user_leave_broadcast_start",
+                room_id,
+                connection_id,
+                user_id=str(user.id),
+                username=user.display_name,
+                session_jti=session_jti,
+            )
+            online_count = int(await redis_client.scard(f"room:{room_id}:online_users"))
+            await manager.broadcast_to_room(
+                room_id,
+                {
+                    "type": "room:user_leave",
+                    "user_id": str(user.id),
+                    "display_name": user.display_name,
+                    "online_count": online_count,
+                },
+            )
+            log_ws_debug(
+                "room_user_leave_broadcast_done",
+                room_id,
+                connection_id,
+                user_id=str(user.id),
+                username=user.display_name,
+                session_jti=session_jti,
+                extra={"online_count": online_count},
+            )

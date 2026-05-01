@@ -12,7 +12,7 @@ async def init_redis() -> None:
         settings.REDIS_URL,
         encoding="utf-8",
         decode_responses=True,
-        max_connections=20,
+        max_connections=settings.REDIS_MAX_CONNECTIONS,
     )
     await _redis_client.ping()
 

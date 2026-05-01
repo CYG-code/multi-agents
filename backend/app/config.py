@@ -9,6 +9,7 @@ ENV_FILE_PATH = Path(__file__).resolve().parents[1] / ".env"
 class Settings(BaseSettings):
     DATABASE_URL: str
     REDIS_URL: str
+    REDIS_MAX_CONNECTIONS: int = 200
 
     # Provider selection: openai_compatible (default) or anthropic.
     LLM_PROVIDER: str = "openai_compatible"
