@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import os
+import time
 import uuid
+from datetime import datetime, timezone
 
 from app.agents.context_builder import get_recent_messages, get_room_context
-from app.agents.queue import dequeue_tasks, requeue_task
+from app.agents.queue import dequeue_tasks, requeue_task, set_task_status
 from app.agents.role_agents import ROLE_AGENTS
 from app.agents.settings import get_agent_settings
 from app.agents.trigger_policy import is_user_trigger
@@ -14,6 +17,20 @@ from app.db.redis_client import get_redis_client
 WORKER_ID = str(uuid.uuid4())
 LOCK_TTL_SECONDS = 30
 POLL_INTERVAL_SECONDS = 1
+AGENT_DEBUG_LOG = os.getenv("AGENT_DEBUG_LOG", "").lower() == "true"
+
+
+def _agent_log(event: str, extra: dict | None = None) -> None:
+    if not AGENT_DEBUG_LOG:
+        return
+    payload = {
+        "event": event,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "worker_id": WORKER_ID,
+    }
+    if extra:
+        payload["extra"] = extra
+    print("[AGENT-WORKER-DEBUG]", payload, flush=True)
 
 
 class AgentWorker:
@@ -23,11 +40,14 @@ class AgentWorker:
     async def run(self) -> None:
         self._running = True
         print(f"[AgentWorker] started worker_id={WORKER_ID}")
+        _agent_log("agent_worker_started")
         while self._running:
             try:
+                _agent_log("agent_worker_poll_start")
                 await self._process_all_rooms()
             except Exception as exc:
                 print(f"[AgentWorker] processing error: {exc}")
+                _agent_log("agent_worker_poll_error", {"exception_class": type(exc).__name__, "exception_message": str(exc)})
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     def stop(self) -> None:
@@ -36,15 +56,41 @@ class AgentWorker:
     async def _process_all_rooms(self) -> None:
         redis_client = get_redis_client()
         rooms = await redis_client.smembers("active_rooms")
+        _agent_log("agent_worker_rooms_loaded", {"room_count": len(rooms), "rooms": list(rooms)[:20]})
         for room_id in rooms:
             tasks = await dequeue_tasks(room_id)
             for task in tasks:
                 await self._execute_task(room_id, task)
 
     async def _execute_task(self, room_id: str, task: dict) -> None:
+        task_id = str(task.get("task_id") or "")
+        trigger_type = str(task.get("trigger_type") or "manual")
+        source_message_id = task.get("source_message_id")
+        _agent_log(
+            "agent_worker_task_start",
+            {
+                "task_id": task_id,
+                "room_id": room_id,
+                "agent_role": task.get("agent_role"),
+                "trigger_type": trigger_type,
+                "source_message_id": source_message_id,
+            },
+        )
         agent_role = (task.get("agent_role") or "").strip().lower()
         if agent_role not in ROLE_AGENTS:
             print(f"[AgentWorker] unknown agent_role={agent_role}")
+            _agent_log("agent_worker_task_failed", {"task_id": task_id, "room_id": room_id, "reason": "unknown_role"})
+            await set_task_status(
+                task_id=task_id,
+                room_id=room_id,
+                agent_role=agent_role,
+                trigger_type=trigger_type,
+                status="failed",
+                reason="unknown_role",
+                source_message_id=source_message_id,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                error="unknown_agent_role",
+            )
             return
 
         cfg = get_agent_settings()
@@ -58,6 +104,18 @@ class AgentWorker:
             print(
                 f"[AgentWorker] drop disabled task room={room_id} role={agent_role} "
                 f"trigger={task.get('trigger_type')} task_id={task.get('task_id')}"
+            )
+            _agent_log("agent_worker_task_dropped", {"task_id": task_id, "room_id": room_id, "reason": "disabled"})
+            await set_task_status(
+                task_id=task_id,
+                room_id=room_id,
+                agent_role=agent_role,
+                trigger_type=trigger_type,
+                status="dropped",
+                reason="disabled",
+                source_message_id=source_message_id,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                drop_reason="disabled",
             )
             return
 
@@ -76,6 +134,18 @@ class AgentWorker:
             print(
                 f"[AgentWorker] drop auto task due to room cooldown "
                 f"room={room_id} trigger={trigger_type} role={agent_role}"
+            )
+            _agent_log("agent_worker_task_dropped", {"task_id": task_id, "room_id": room_id, "reason": "room_auto_cooldown"})
+            await set_task_status(
+                task_id=task_id,
+                room_id=room_id,
+                agent_role=agent_role,
+                trigger_type=trigger_type,
+                status="dropped",
+                reason="room_auto_cooldown",
+                source_message_id=source_message_id,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                drop_reason="room_auto_cooldown",
             )
             return
 
@@ -100,15 +170,55 @@ class AgentWorker:
                     f"[AgentWorker] drop auto task due to role cooldown "
                     f"room={room_id} role={agent_role} trigger={trigger_type}"
                 )
+            _agent_log(
+                "agent_worker_task_dropped",
+                {"task_id": task_id, "room_id": room_id, "reason": "role_cooldown", "remaining_seconds": remaining_seconds},
+            )
+            await set_task_status(
+                task_id=task_id,
+                room_id=room_id,
+                agent_role=agent_role,
+                trigger_type=trigger_type,
+                status="dropped",
+                reason="role_cooldown",
+                source_message_id=source_message_id,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                drop_reason="role_cooldown",
+            )
             return
 
         lock_key = f"room:{room_id}:agent_lock"
+        _agent_log("agent_lock_acquire_start", {"task_id": task_id, "room_id": room_id, "lock_key": lock_key, "lock_ttl": LOCK_TTL_SECONDS})
         acquired = await redis_client.set(lock_key, WORKER_ID, nx=True, ex=LOCK_TTL_SECONDS)
         if not acquired:
+            _agent_log("agent_lock_acquire_failed", {"task_id": task_id, "room_id": room_id, "lock_key": lock_key, "action": "requeue"})
             await requeue_task(room_id, task, delay_seconds=5)
             return
+        _agent_log("agent_lock_acquire_success", {"task_id": task_id, "room_id": room_id, "lock_key": lock_key})
+        await set_task_status(
+            task_id=task_id,
+            room_id=room_id,
+            agent_role=agent_role,
+            trigger_type=trigger_type,
+            status="running",
+            reason=str(task.get("reason") or ""),
+            source_message_id=source_message_id,
+            running_at=datetime.now(timezone.utc).isoformat(),
+        )
+        await self._publish_task_state_event(
+            room_id=room_id,
+            task_id=task_id,
+            agent_role=agent_role,
+            source_message_id=source_message_id,
+            event_type="agent:running",
+            status="running",
+            message="Agent task is running.",
+        )
 
         try:
+            wait_ms = round((time.time() - float(task.get("triggered_at") or time.time())) * 1000, 3)
+            _agent_log("agent_worker_task_exec_start", {"task_id": task_id, "room_id": room_id, "wait_ms": wait_ms})
+            exec_started = time.perf_counter()
             context = await get_room_context(room_id)
             history = await get_recent_messages(room_id)
             agent = ROLE_AGENTS[agent_role]
@@ -130,7 +240,42 @@ class AgentWorker:
                     f"[AgentWorker] timeout room={room_id} role={agent_role} "
                     f"trigger={task.get('trigger_type')} timeout={timeout_seconds}s"
                 )
-                await requeue_task(room_id, task, delay_seconds=5)
+                queue_len = int(await redis_client.zcard(f"agent_queue:{room_id}"))
+                lock_exists = bool(await redis_client.exists(lock_key))
+                _agent_log(
+                    "agent_worker_task_timeout",
+                    {
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "agent_role": agent_role,
+                        "wait_ms": wait_ms,
+                        "exec_ms": round((time.perf_counter() - exec_started) * 1000, 3),
+                        "timeout_seconds": timeout_seconds,
+                        "queue_length": queue_len,
+                        "lock_exists": lock_exists,
+                    },
+                )
+                await set_task_status(
+                    task_id=task_id,
+                    room_id=room_id,
+                    agent_role=agent_role,
+                    trigger_type=trigger_type,
+                    status="timeout",
+                    reason="worker_timeout",
+                    source_message_id=source_message_id,
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    error=f"timeout after {timeout_seconds}s",
+                )
+                await self._publish_task_state_event(
+                    room_id=room_id,
+                    task_id=task_id,
+                    agent_role=agent_role,
+                    source_message_id=source_message_id,
+                    event_type="agent:failed",
+                    status="timeout",
+                    reason="worker_timeout",
+                    message=f"Agent task timed out after {timeout_seconds}s.",
+                )
                 return
 
             await redis_client.setex(cooldown_key, cfg.timing.agent_cooldown_seconds, "1")
@@ -144,10 +289,55 @@ class AgentWorker:
                 f"[AgentWorker] executed room={room_id} role={agent_role} "
                 f"trigger={task.get('trigger_type')} reason={task.get('reason')}"
             )
+            _agent_log(
+                "agent_worker_task_done",
+                {
+                    "task_id": task_id,
+                    "room_id": room_id,
+                    "agent_role": agent_role,
+                    "wait_ms": wait_ms,
+                    "exec_ms": round((time.perf_counter() - exec_started) * 1000, 3),
+                },
+            )
+        except Exception as exc:
+            await set_task_status(
+                task_id=task_id,
+                room_id=room_id,
+                agent_role=agent_role,
+                trigger_type=trigger_type,
+                status="failed",
+                reason="worker_exception",
+                source_message_id=source_message_id,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                error=str(exc),
+            )
+            await self._publish_task_state_event(
+                room_id=room_id,
+                task_id=task_id,
+                agent_role=agent_role,
+                source_message_id=source_message_id,
+                event_type="agent:failed",
+                status="failed",
+                reason="worker_exception",
+                message="Agent task failed in worker.",
+                error=str(exc),
+            )
+            _agent_log(
+                "agent_worker_task_failed",
+                {
+                    "task_id": task_id,
+                    "room_id": room_id,
+                    "agent_role": agent_role,
+                    "exception_class": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+            )
+            raise
         finally:
             current_lock = await redis_client.get(lock_key)
             if current_lock == WORKER_ID:
                 await redis_client.delete(lock_key)
+                _agent_log("agent_lock_release", {"task_id": task_id, "room_id": room_id, "lock_key": lock_key})
 
     async def _publish_queue_dropped(
         self,
@@ -171,13 +361,97 @@ class AgentWorker:
             "reason": reason,
             "message": message,
         }
+        await set_task_status(
+            task_id=str(task.get("task_id") or ""),
+            room_id=room_id,
+            agent_role=agent_role,
+            trigger_type=str(task.get("trigger_type") or "manual"),
+            status="dropped",
+            reason=reason,
+            source_message_id=source_message_id,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            drop_reason=reason,
+        )
+        _agent_log(
+            "agent_dropped_broadcast_start",
+            {
+                "task_id": task.get("task_id"),
+                "room_id": room_id,
+                "agent_role": agent_role,
+                "reason": reason,
+                "source_message_id": source_message_id,
+            },
+        )
         try:
             redis_client = get_redis_client()
             await redis_client.publish(f"room:{room_id}", json.dumps(payload, ensure_ascii=False))
+            _agent_log(
+                "agent_dropped_broadcast_done",
+                {
+                    "task_id": task.get("task_id"),
+                    "room_id": room_id,
+                    "agent_role": agent_role,
+                    "reason": reason,
+                },
+            )
         except Exception as exc:
             print(
                 f"[AgentWorker] publish queue_dropped failed room={room_id} "
                 f"role={agent_role} reason={reason} error={exc}"
+            )
+            _agent_log(
+                "agent_dropped_broadcast_failed",
+                {
+                    "task_id": task.get("task_id"),
+                    "room_id": room_id,
+                    "agent_role": agent_role,
+                    "reason": reason,
+                    "exception_class": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+            )
+
+    async def _publish_task_state_event(
+        self,
+        *,
+        room_id: str,
+        task_id: str,
+        agent_role: str,
+        source_message_id: str | None,
+        event_type: str,
+        status: str,
+        reason: str | None = None,
+        message: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if not source_message_id or not agent_role:
+            return
+        payload = {
+            "type": event_type,
+            "task_id": task_id,
+            "agent_role": agent_role,
+            "source_message_id": source_message_id,
+            "status": status,
+        }
+        if reason:
+            payload["reason"] = reason
+        if message:
+            payload["message"] = message
+        if error:
+            payload["error"] = error
+        try:
+            redis_client = get_redis_client()
+            await redis_client.publish(f"room:{room_id}", json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:
+            _agent_log(
+                "agent_state_broadcast_failed",
+                {
+                    "task_id": task_id,
+                    "room_id": room_id,
+                    "event_type": event_type,
+                    "exception_class": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
             )
 
     @staticmethod

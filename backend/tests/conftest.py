@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.db.session import get_db
 from app.dependencies import get_current_user, require_teacher
 from app.models.user import User, UserRole
-from app.routers import auth, rooms, tasks
+from app.routers import agents, auth, rooms, tasks
 
 
 class FakeScalarResult:
@@ -100,6 +100,7 @@ def test_app(
     app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
     app.include_router(rooms.router, prefix="/api/rooms", tags=["房间"])
     app.include_router(tasks.router, prefix="/api/tasks", tags=["任务"])
+    app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
 
     async def override_get_db() -> AsyncIterator[FakeDBSession]:
         yield fake_db

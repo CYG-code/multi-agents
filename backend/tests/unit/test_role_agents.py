@@ -77,11 +77,17 @@ async def test_generate_and_push_success(monkeypatch):
     factory = _SessionFactory([init_session, update_session])
     redis = _FakeRedis()
     events = []
+    status_updates = []
 
     monkeypatch.setattr(role_agents, "AsyncSessionLocal", factory)
     monkeypatch.setattr(role_agents.MessageService, "get_next_seq_num", _fake_next_seq)
     monkeypatch.setattr(role_agents, "stream_completion", _stream_tokens)
     monkeypatch.setattr(role_agents, "get_redis_client", lambda: redis)
+
+    async def _fake_set_task_status(**kwargs):
+        status_updates.append(kwargs)
+
+    monkeypatch.setattr(role_agents, "set_task_status", _fake_set_task_status)
 
     async def _capture(_self, _room_id, payload):
         events.append(payload)
@@ -103,6 +109,7 @@ async def test_generate_and_push_success(monkeypatch):
     assert stream_end["error"] is None
     assert redis.set_calls
     assert redis.sadd_calls
+    assert any(s.get("status") == "replied" for s in status_updates)
 
 
 @pytest.mark.asyncio
@@ -111,11 +118,17 @@ async def test_generate_and_push_generation_failure_includes_error(monkeypatch):
     update_session = _FakeSession()
     factory = _SessionFactory([init_session, update_session])
     events = []
+    status_updates = []
 
     monkeypatch.setattr(role_agents, "AsyncSessionLocal", factory)
     monkeypatch.setattr(role_agents.MessageService, "get_next_seq_num", _fake_next_seq)
     monkeypatch.setattr(role_agents, "stream_completion", _stream_fail)
     monkeypatch.setattr(role_agents, "get_redis_client", lambda: _FakeRedis())
+
+    async def _fake_set_task_status(**kwargs):
+        status_updates.append(kwargs)
+
+    monkeypatch.setattr(role_agents, "set_task_status", _fake_set_task_status)
 
     async def _capture(_self, _room_id, payload):
         events.append(payload)
@@ -135,6 +148,7 @@ async def test_generate_and_push_generation_failure_includes_error(monkeypatch):
     assert stream_end["status"] == "failed"
     assert stream_end["content"] == ""
     assert "Connection error." in (stream_end["error"] or "")
+    assert any(s.get("status") == "failed" for s in status_updates)
 
 
 @pytest.mark.asyncio
@@ -143,11 +157,17 @@ async def test_generate_and_push_db_update_failure_marks_failed(monkeypatch):
     update_session = _FakeSession(fail_execute=True)
     factory = _SessionFactory([init_session, update_session])
     events = []
+    status_updates = []
 
     monkeypatch.setattr(role_agents, "AsyncSessionLocal", factory)
     monkeypatch.setattr(role_agents.MessageService, "get_next_seq_num", _fake_next_seq)
     monkeypatch.setattr(role_agents, "stream_completion", _stream_tokens)
     monkeypatch.setattr(role_agents, "get_redis_client", lambda: _FakeRedis())
+
+    async def _fake_set_task_status(**kwargs):
+        status_updates.append(kwargs)
+
+    monkeypatch.setattr(role_agents, "set_task_status", _fake_set_task_status)
 
     async def _capture(_self, _room_id, payload):
         events.append(payload)
@@ -166,6 +186,7 @@ async def test_generate_and_push_db_update_failure_marks_failed(monkeypatch):
     stream_end = [e for e in events if e["type"] == "agent:stream_end"][-1]
     assert stream_end["status"] == "failed"
     assert "DB update failed" in (stream_end["error"] or "")
+    assert any(s.get("status") == "failed" for s in status_updates)
 
 
 def test_devil_advocate_includes_skill_spec_in_system_prompt():

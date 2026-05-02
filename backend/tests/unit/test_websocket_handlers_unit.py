@@ -139,11 +139,13 @@ async def test_handle_chat_message_broadcasts_and_triggers(monkeypatch):
     broadcast_payloads = []
     triggered = {"mentions": None, "monopoly": None}
 
-    async def _fake_save(_db, room_id, user_id, content, mentions):
+    async def _fake_save(_db, room_id, user_id, content, mentions, connection_id=None, loadmsg_id=None):
         saved["room_id"] = room_id
         saved["user_id"] = user_id
         saved["content"] = content
         saved["mentions"] = mentions
+        saved["connection_id"] = connection_id
+        saved["loadmsg_id"] = loadmsg_id
         return msg
 
     async def _fake_broadcast(_room_id, payload):

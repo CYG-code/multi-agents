@@ -1,16 +1,38 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
+from datetime import datetime, timezone
 
 from app.db.redis_client import get_redis_client
 
 QUEUE_KEY_PREFIX = "agent_queue"
+TASK_STATUS_KEY_PREFIX = "agent:task"
+TASK_STATUS_TTL_SECONDS = 24 * 60 * 60
+AGENT_DEBUG_LOG = os.getenv("AGENT_DEBUG_LOG", "").lower() == "true"
+
+
+def _agent_log(event: str, extra: dict | None = None) -> None:
+    if not AGENT_DEBUG_LOG:
+        return
+    payload = {"event": event, "ts": datetime.now(timezone.utc).isoformat()}
+    if extra:
+        payload["extra"] = extra
+    print("[AGENT-QUEUE-DEBUG]", payload, flush=True)
 
 
 def queue_key(room_id: str) -> str:
     return f"{QUEUE_KEY_PREFIX}:{room_id}"
+
+
+def task_status_key(task_id: str) -> str:
+    return f"{TASK_STATUS_KEY_PREFIX}:{task_id}"
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _normalize_task(task: dict) -> dict:
@@ -53,19 +75,60 @@ async def enqueue_task(room_id: str, task: dict, delay_seconds: float = 0.0) -> 
     normalized = _normalize_task(task)
     normalized["room_id"] = normalized.get("room_id") or room_id
     _validate_task(normalized)
+    qkey = queue_key(room_id)
+    _agent_log(
+        "agent_enqueue_start",
+        {
+            "task_id": normalized.get("task_id"),
+            "room_id": room_id,
+            "agent_role": normalized.get("agent_role"),
+            "trigger_type": normalized.get("trigger_type"),
+            "source_message_id": normalized.get("source_message_id"),
+            "queue_key": qkey,
+            "priority": normalized.get("priority"),
+            "created_at": normalized.get("triggered_at"),
+            "execute_at": execute_at,
+        },
+    )
     task_json = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
-    await redis_client.zadd(queue_key(room_id), {task_json: execute_at})
+    await redis_client.zadd(qkey, {task_json: execute_at})
+    await set_task_status(
+        task_id=str(normalized.get("task_id")),
+        room_id=room_id,
+        agent_role=str(normalized.get("agent_role") or ""),
+        trigger_type=str(normalized.get("trigger_type") or "manual"),
+        status="queued",
+        reason=str(normalized.get("reason") or ""),
+        source_message_id=normalized.get("source_message_id"),
+        queued_at=now_iso(),
+        created_at=str(normalized.get("created_at") or normalized.get("triggered_at") or now_iso()),
+    )
+    qlen = int(await redis_client.zcard(qkey))
+    _agent_log(
+        "agent_enqueue_done",
+        {
+            "task_id": normalized.get("task_id"),
+            "room_id": room_id,
+            "queue_key": qkey,
+            "queue_length": qlen,
+        },
+    )
     return normalized
 
 
 async def dequeue_tasks(room_id: str) -> list[dict]:
     redis_client = get_redis_client()
+    qkey = queue_key(room_id)
     now = time.time()
-    raw_tasks = await redis_client.zrangebyscore(queue_key(room_id), min=0, max=now)
+    raw_tasks = await redis_client.zrangebyscore(qkey, min=0, max=now)
     if not raw_tasks:
+        _agent_log(
+            "agent_worker_task_none",
+            {"room_id": room_id, "queue_key": qkey, "queue_length": int(await redis_client.zcard(qkey))},
+        )
         return []
 
-    await redis_client.zrem(queue_key(room_id), *raw_tasks)
+    await redis_client.zrem(qkey, *raw_tasks)
 
     parsed: list[dict] = []
     for raw in raw_tasks:
@@ -81,8 +144,77 @@ async def dequeue_tasks(room_id: str) -> list[dict]:
             str(t.get("task_id", "")),
         )
     )
+    _agent_log(
+        "agent_worker_task_popped",
+        {
+            "room_id": room_id,
+            "queue_key": qkey,
+            "popped_count": len(parsed),
+            "remaining_queue_length": int(await redis_client.zcard(qkey)),
+            "task_ids": [str(t.get("task_id")) for t in parsed],
+        },
+    )
     return parsed
 
 
 async def requeue_task(room_id: str, task: dict, delay_seconds: float = 5.0) -> dict:
     return await enqueue_task(room_id, task, delay_seconds=delay_seconds)
+
+
+async def set_task_status(
+    *,
+    task_id: str,
+    room_id: str,
+    agent_role: str,
+    trigger_type: str,
+    status: str,
+    reason: str = "",
+    source_message_id: str | None = None,
+    running_at: str | None = None,
+    finished_at: str | None = None,
+    error: str | None = None,
+    drop_reason: str | None = None,
+    created_at: str | None = None,
+    queued_at: str | None = None,
+) -> None:
+    if not task_id:
+        return
+    redis_client = get_redis_client()
+    key = task_status_key(task_id)
+    payload = {
+        "task_id": task_id,
+        "room_id": room_id,
+        "agent_role": agent_role,
+        "trigger_type": trigger_type,
+        "status": status,
+        "reason": reason or "",
+        "source_message_id": source_message_id or "",
+        "running_at": running_at or "",
+        "finished_at": finished_at or "",
+        "error": error or "",
+        "drop_reason": drop_reason or "",
+    }
+    if created_at is not None:
+        payload["created_at"] = created_at
+    if queued_at is not None:
+        payload["queued_at"] = queued_at
+    await redis_client.hset(key, mapping=payload)
+    await redis_client.expire(key, TASK_STATUS_TTL_SECONDS)
+
+
+async def update_task_status_fields(task_id: str, **fields: str) -> None:
+    if not task_id or not fields:
+        return
+    redis_client = get_redis_client()
+    key = task_status_key(task_id)
+    await redis_client.hset(key, mapping={k: str(v) for k, v in fields.items()})
+    await redis_client.expire(key, TASK_STATUS_TTL_SECONDS)
+
+
+async def get_task_status(task_id: str) -> dict[str, str]:
+    if not task_id:
+        return {}
+    redis_client = get_redis_client()
+    key = task_status_key(task_id)
+    data = await redis_client.hgetall(key)
+    return {str(k): str(v) for k, v in (data or {}).items()}

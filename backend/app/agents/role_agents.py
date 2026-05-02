@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import time
 import traceback
 import uuid
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from app.agents.llm_client import stream_completion
+from app.agents.queue import set_task_status
 from app.agents.settings import get_agent_settings
 from app.config import settings
 from app.db.redis_client import get_redis_client
@@ -19,6 +21,17 @@ from app.db.session import AsyncSessionLocal
 from app.models.message import Message, MessageStatus, SenderType
 from app.models.user import User
 from app.services.message_service import MessageService
+
+AGENT_DEBUG_LOG = os.getenv("AGENT_DEBUG_LOG", "").lower() == "true"
+
+
+def _agent_log(event: str, extra: dict | None = None) -> None:
+    if not AGENT_DEBUG_LOG:
+        return
+    payload = {"event": event, "ts": datetime.now(timezone.utc).isoformat()}
+    if extra:
+        payload["extra"] = extra
+    print("[AGENT-ROLE-DEBUG]", payload, flush=True)
 
 
 class BaseRoleAgent(ABC):
@@ -147,6 +160,17 @@ class BaseRoleAgent(ABC):
         trigger_type: str | None = None,
         task: dict | None = None,
     ) -> None:
+        task_id = (task or {}).get("task_id")
+        _agent_log(
+            "agent_generate_start",
+            {
+                "task_id": task_id,
+                "room_id": room_id,
+                "agent_role": self.ROLE,
+                "trigger_type": trigger_type,
+                "source_message_id": source_message_id,
+            },
+        )
         message_id = str(uuid.uuid4())
         persisted_source_message_uuid = None
         persisted_source_message_id: str | None = None
@@ -214,6 +238,17 @@ class BaseRoleAgent(ABC):
         try:
             system_prompt = self.build_system_prompt(context, task)
             messages = self.build_messages(history)
+            llm_started = time.perf_counter()
+            _agent_log(
+                "llm_call_start",
+                {
+                    "task_id": task_id,
+                    "room_id": room_id,
+                    "agent_role": self.ROLE,
+                    "model": self.model,
+                    "base_url": settings.OPENAI_BASE_URL,
+                },
+            )
             async for token in stream_completion(
                 system_prompt=system_prompt,
                 messages=messages,
@@ -234,11 +269,31 @@ class BaseRoleAgent(ABC):
                         "trigger_type": trigger_type,
                     },
                 )
+            _agent_log(
+                "llm_call_done",
+                {
+                    "task_id": task_id,
+                    "room_id": room_id,
+                    "agent_role": self.ROLE,
+                    "llm_latency_ms": round((time.perf_counter() - llm_started) * 1000, 3),
+                    "content_len": len(full_content),
+                },
+            )
         except Exception as exc:
             print(f"[{self.__class__.__name__}] generation failed: {exc}")
             traceback.print_exc()
             error_detail = str(exc)
             success = False
+            _agent_log(
+                "llm_call_failed",
+                {
+                    "task_id": task_id,
+                    "room_id": room_id,
+                    "agent_role": self.ROLE,
+                    "exception_class": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+            )
         finally:
             final_status = MessageStatus.ok if success else MessageStatus.failed
             try:
@@ -264,6 +319,29 @@ class BaseRoleAgent(ABC):
                 await redis_client.set(f"room:{room_id}:last_msg_time", now_ts)
                 await redis_client.sadd("active_rooms", room_id)
 
+            if success:
+                _agent_log(
+                    "agent_reply_broadcast_start",
+                    {
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "agent_role": self.ROLE,
+                        "message_id": message_id,
+                        "source_message_id": persisted_source_message_id,
+                    },
+                )
+            else:
+                _agent_log(
+                    "agent_failed_broadcast_start",
+                    {
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "agent_role": self.ROLE,
+                        "message_id": message_id,
+                        "source_message_id": persisted_source_message_id,
+                        "error": error_detail,
+                    },
+                )
             await self._broadcast(
                 room_id,
                 {
@@ -279,6 +357,37 @@ class BaseRoleAgent(ABC):
                     "trigger_type": trigger_type,
                     "error": error_detail,
                 },
+            )
+            if success:
+                _agent_log(
+                    "agent_reply_broadcast_done",
+                    {
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "agent_role": self.ROLE,
+                        "message_id": message_id,
+                    },
+                )
+            else:
+                _agent_log(
+                    "agent_failed_broadcast_done",
+                    {
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "agent_role": self.ROLE,
+                        "message_id": message_id,
+                    },
+                )
+            await set_task_status(
+                task_id=str(task_id or ""),
+                room_id=room_id,
+                agent_role=self.ROLE,
+                trigger_type=str(trigger_type or (task or {}).get("trigger_type") or "manual"),
+                status="replied" if success else "failed",
+                reason=str((task or {}).get("reason") or ""),
+                source_message_id=persisted_source_message_id,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                error=None if success else (error_detail or "unknown_error"),
             )
 
             await self._broadcast(
@@ -296,7 +405,20 @@ class BaseRoleAgent(ABC):
 
     async def _broadcast(self, room_id: str, data: dict) -> None:
         redis_client = get_redis_client()
-        await redis_client.publish(f"room:{room_id}", json.dumps(data, ensure_ascii=False))
+        try:
+            await redis_client.publish(f"room:{room_id}", json.dumps(data, ensure_ascii=False))
+        except Exception as exc:
+            _agent_log(
+                "send_json_error",
+                {
+                    "room_id": room_id,
+                    "agent_role": self.ROLE,
+                    "payload_type": data.get("type"),
+                    "exception_class": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+            )
+            raise
 
 
 class FacilitatorAgent(BaseRoleAgent):
