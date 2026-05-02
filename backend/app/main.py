@@ -9,7 +9,7 @@ from app.agents.llm_client import initialize_model_routing
 from app.analysis.scheduler import start_scheduler, stop_scheduler
 from app.config import settings
 from app.db.redis_client import clear_online_presence_keys, close_redis, init_redis
-from app.routers import auth, rooms, tasks
+from app.routers import agents, auth, rooms, tasks
 from app.websocket.handlers import websocket_endpoint
 
 
@@ -48,6 +48,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(rooms.router, prefix="/api/rooms", tags=["rooms"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
+app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
 if settings.debug_enabled:
     try:
         from app.routers import debug
