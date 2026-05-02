@@ -11,6 +11,10 @@ from app.db.redis_client import get_redis_client
 QUEUE_KEY_PREFIX = "agent_queue"
 TASK_STATUS_KEY_PREFIX = "agent:task"
 TASK_STATUS_TTL_SECONDS = 24 * 60 * 60
+MENTION_ENTRY_QUEUE_KEY = "agent:mention_entry_queue"
+MENTION_ENTRY_KEY_PREFIX = "agent:mention_entry"
+MENTION_ENTRY_STATUS_KEY_PREFIX = "agent:mention_entry_status"
+MENTION_ENTRY_TTL_SECONDS = 24 * 60 * 60
 AGENT_DEBUG_LOG = os.getenv("AGENT_DEBUG_LOG", "").lower() == "true"
 
 
@@ -33,6 +37,14 @@ def task_status_key(task_id: str) -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def mention_entry_key(entry_id: str) -> str:
+    return f"{MENTION_ENTRY_KEY_PREFIX}:{entry_id}"
+
+
+def mention_entry_status_key(entry_id: str) -> str:
+    return f"{MENTION_ENTRY_STATUS_KEY_PREFIX}:{entry_id}"
 
 
 def _normalize_task(task: dict) -> dict:
@@ -218,3 +230,120 @@ async def get_task_status(task_id: str) -> dict[str, str]:
     key = task_status_key(task_id)
     data = await redis_client.hgetall(key)
     return {str(k): str(v) for k, v in (data or {}).items()}
+
+
+async def create_mention_entry(
+    *,
+    room_id: str,
+    agent_role: str,
+    source_message_id: str,
+    student_name: str,
+    reason: str,
+    strategy: str,
+    trigger_type: str = "mention",
+    entry_id: str | None = None,
+    created_at: float | None = None,
+    expire_at: float | None = None,
+) -> dict[str, str]:
+    redis_client = get_redis_client()
+    now_ts = float(created_at if created_at is not None else time.time())
+    expiry_ts = float(expire_at if expire_at is not None else now_ts + MENTION_ENTRY_TTL_SECONDS)
+    eid = str(entry_id or uuid.uuid4())
+    entry = {
+        "entry_id": eid,
+        "room_id": room_id,
+        "agent_role": agent_role,
+        "source_message_id": source_message_id,
+        "student_name": student_name,
+        "reason": reason,
+        "strategy": strategy,
+        "trigger_type": trigger_type or "mention",
+        "created_at": str(now_ts),
+        "expire_at": str(expiry_ts),
+    }
+    ekey = mention_entry_key(eid)
+    skey = mention_entry_status_key(eid)
+    await redis_client.hset(ekey, mapping=entry)
+    await redis_client.expire(ekey, MENTION_ENTRY_TTL_SECONDS)
+    await redis_client.hset(
+        skey,
+        mapping={
+            "entry_id": eid,
+            "status": "queued",
+            "reason": "",
+            "task_id": "",
+            "error": "",
+            "updated_at": now_iso(),
+        },
+    )
+    await redis_client.expire(skey, MENTION_ENTRY_TTL_SECONDS)
+    await redis_client.zadd(MENTION_ENTRY_QUEUE_KEY, {eid: now_ts})
+    return entry
+
+
+async def get_mention_entry(entry_id: str) -> dict[str, str]:
+    if not entry_id:
+        return {}
+    redis_client = get_redis_client()
+    data = await redis_client.hgetall(mention_entry_key(entry_id))
+    return {str(k): str(v) for k, v in (data or {}).items()}
+
+
+async def pop_due_mention_entries(limit: int) -> list[dict[str, str]]:
+    safe_limit = max(0, int(limit))
+    if safe_limit <= 0:
+        return []
+    redis_client = get_redis_client()
+    now_ts = time.time()
+    # NOTE: Step-1 assumes single consumer; atomic multi-consumer pop can be added later via Lua.
+    entry_ids = await redis_client.zrangebyscore(
+        MENTION_ENTRY_QUEUE_KEY,
+        min=0,
+        max=now_ts,
+        start=0,
+        num=safe_limit,
+    )
+    if not entry_ids:
+        return []
+    await redis_client.zrem(MENTION_ENTRY_QUEUE_KEY, *entry_ids)
+    entries: list[dict[str, str]] = []
+    for entry_id in entry_ids:
+        entry = await get_mention_entry(str(entry_id))
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+async def mark_mention_entry_status(
+    entry_id: str,
+    status: str,
+    reason: str | None = None,
+    task_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    if not entry_id:
+        return
+    redis_client = get_redis_client()
+    payload = {
+        "entry_id": entry_id,
+        "status": status,
+        "reason": reason or "",
+        "task_id": task_id or "",
+        "error": error or "",
+        "updated_at": now_iso(),
+    }
+    skey = mention_entry_status_key(entry_id)
+    await redis_client.hset(skey, mapping=payload)
+    await redis_client.expire(skey, MENTION_ENTRY_TTL_SECONDS)
+
+
+async def remove_mention_entry_from_queue(entry_id: str) -> None:
+    if not entry_id:
+        return
+    redis_client = get_redis_client()
+    await redis_client.zrem(MENTION_ENTRY_QUEUE_KEY, entry_id)
+
+
+async def get_mention_entry_queue_length() -> int:
+    redis_client = get_redis_client()
+    return int(await redis_client.zcard(MENTION_ENTRY_QUEUE_KEY))

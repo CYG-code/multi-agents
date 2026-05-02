@@ -22,6 +22,12 @@ class TimingConfig(BaseModel):
     room_auto_intervention_cooldown_seconds: int = 180
     rule_trigger_marker_ttl_seconds: int = 180
     agent_response_timeout_seconds: int = 90
+    agent_global_concurrency_limit: int = 3
+    mention_entry_enabled: bool = False
+    mention_entry_rate_per_sec: int = 3
+    mention_entry_queue_max_wait_sec: int = 60
+    room_role_manual_mention_cooldown_sec: int = 30
+    mention_entry_queue_max_size: int = 2000
 
 
 class ThresholdsConfig(BaseModel):

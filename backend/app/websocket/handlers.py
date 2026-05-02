@@ -20,7 +20,7 @@ from app.agents.agent_messages import (
     MENTION_STRATEGY,
     MENTION_UNSUPPORTED,
 )
-from app.agents.queue import enqueue_task
+from app.agents.queue import create_mention_entry, enqueue_task
 from app.agents.queue import queue_key
 from app.agents.role_agents import ROLE_AGENTS
 from app.agents.settings import get_agent_settings
@@ -186,24 +186,55 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
             )
             continue
 
+        mention_entry_enabled = bool(getattr(cfg.timing, "mention_entry_enabled", False))
+        mention_entry_payload = None
+        if mention_entry_enabled:
+            now_ts = time.time()
+            expire_ts = now_ts + max(1, int(getattr(cfg.timing, "mention_entry_queue_max_wait_sec", 60)))
+            mention_entry_payload = await create_mention_entry(
+                room_id=room_id,
+                agent_role=role,
+                source_message_id=source_message_id,
+                student_name=user.display_name,
+                reason=f"Student {user.display_name} mentioned @{role}.",
+                strategy="Prioritize responding to this student and provide a concrete next step.",
+                trigger_type="mention",
+                created_at=now_ts,
+                expire_at=expire_ts,
+            )
+
+        ack_payload = {
+            "type": "agent:ack",
+            "agent_role": role,
+            "source_message_id": source_message_id,
+            "status": "accepted",
+            "message": "Agent mention accepted.",
+        }
+        if mention_entry_payload is not None:
+            ack_payload["entry_id"] = mention_entry_payload.get("entry_id")
+            ack_payload["queue_mode"] = "entry_queue"
+
         log_agent_debug(
             "agent_mention_ack_broadcast_start",
             {"room_id": room_id, "source_message_id": source_message_id, "agent_role": role},
         )
-        await manager.broadcast_to_room(
-            room_id,
-            {
-                "type": "agent:ack",
-                "agent_role": role,
-                "source_message_id": source_message_id,
-                "status": "accepted",
-                "message": "Agent mention accepted.",
-            },
-        )
+        await manager.broadcast_to_room(room_id, ack_payload)
         log_agent_debug(
             "agent_mention_ack_broadcast_done",
             {"room_id": room_id, "source_message_id": source_message_id, "agent_role": role},
         )
+
+        if mention_entry_enabled:
+            log_agent_debug(
+                "agent_mention_entry_created",
+                {
+                    "room_id": room_id,
+                    "source_message_id": source_message_id,
+                    "agent_role": role,
+                    "entry_id": mention_entry_payload.get("entry_id") if mention_entry_payload else None,
+                },
+            )
+            continue
 
         log_agent_debug(
             "agent_enqueue_start",

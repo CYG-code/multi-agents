@@ -8,6 +8,12 @@ timing:
   room_auto_intervention_cooldown_seconds: 180
   rule_trigger_marker_ttl_seconds: 180
   agent_response_timeout_seconds: 90
+  agent_global_concurrency_limit: 3
+  mention_entry_enabled: true
+  mention_entry_rate_per_sec: 3
+  mention_entry_queue_max_wait_sec: 60
+  room_role_manual_mention_cooldown_sec: 30
+  mention_entry_queue_max_size: 2000
 
 thresholds:
   diversity_score_threshold: 0.3

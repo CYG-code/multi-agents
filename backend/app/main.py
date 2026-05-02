@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents.mention_entry_worker import mention_entry_worker
 from app.agents.agent_worker import agent_worker
 from app.agents.llm_client import initialize_model_routing
 from app.analysis.scheduler import start_scheduler, stop_scheduler
@@ -20,13 +21,20 @@ async def lifespan(app: FastAPI):
     await initialize_model_routing()
     start_scheduler()
     worker_task = asyncio.create_task(agent_worker.run())
+    mention_entry_worker_task = asyncio.create_task(mention_entry_worker.run())
     try:
         yield
     finally:
         agent_worker.stop()
+        mention_entry_worker.stop()
         worker_task.cancel()
+        mention_entry_worker_task.cancel()
         try:
             await worker_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await mention_entry_worker_task
         except asyncio.CancelledError:
             pass
         stop_scheduler()
