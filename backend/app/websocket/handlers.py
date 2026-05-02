@@ -37,6 +37,7 @@ from app.services import writing_doc_service
 from app.websocket.manager import manager
 
 WS_DEBUG_LOG = os.getenv("WS_DEBUG_LOG", "").lower() == "true"
+AGENT_DEBUG_LOG = os.getenv("AGENT_DEBUG_LOG", "").lower() == "true"
 
 
 def _short_jti(session_jti: str | None) -> str | None:
@@ -72,6 +73,15 @@ def log_ws_debug(
     if extra:
         payload["extra"] = extra
     print("[WS-DEBUG]", payload, flush=True)
+
+
+def log_agent_debug(event: str, extra: dict | None = None) -> None:
+    if not AGENT_DEBUG_LOG:
+        return
+    payload = {"event": event, "ts": datetime.now(timezone.utc).isoformat()}
+    if extra:
+        payload["extra"] = extra
+    print("[AGENT-MENTION-DEBUG]", payload, flush=True)
 
 
 async def verify_token(token: str | None, db: AsyncSession) -> tuple[User, str] | None:
@@ -145,7 +155,21 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
         return
 
     for role in _normalized_mentions(mentions):
+        log_agent_debug(
+            "agent_mention_role_start",
+            {
+                "room_id": room_id,
+                "source_message_id": source_message_id,
+                "agent_role": role,
+                "username": user.display_name,
+            },
+        )
+
         if role not in ROLE_AGENTS:
+            log_agent_debug(
+                "agent_mention_unsupported_broadcast_start",
+                {"room_id": room_id, "source_message_id": source_message_id, "agent_role": role},
+            )
             await manager.broadcast_to_room(
                 room_id,
                 {
@@ -153,11 +177,19 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
                     "agent_role": role,
                     "source_message_id": source_message_id,
                     "status": "unsupported",
-                    "message": "当前版本暂不支持该智能体。",
+                    "message": "Current version does not support this agent role.",
                 },
+            )
+            log_agent_debug(
+                "agent_mention_unsupported_broadcast_done",
+                {"room_id": room_id, "source_message_id": source_message_id, "agent_role": role},
             )
             continue
 
+        log_agent_debug(
+            "agent_mention_ack_broadcast_start",
+            {"room_id": room_id, "source_message_id": source_message_id, "agent_role": role},
+        )
         await manager.broadcast_to_room(
             room_id,
             {
@@ -165,17 +197,32 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
                 "agent_role": role,
                 "source_message_id": source_message_id,
                 "status": "accepted",
-                "message": "已收到召唤。",
+                "message": "Agent mention accepted.",
             },
         )
+        log_agent_debug(
+            "agent_mention_ack_broadcast_done",
+            {"room_id": room_id, "source_message_id": source_message_id, "agent_role": role},
+        )
 
+        log_agent_debug(
+            "agent_enqueue_start",
+            {
+                "room_id": room_id,
+                "source_message_id": source_message_id,
+                "agent_role": role,
+                "queue_key": queue_key(room_id),
+                "priority": cfg.mention.priority,
+                "trigger_type": "mention",
+            },
+        )
         task = await enqueue_task(
             room_id,
             {
                 "room_id": room_id,
                 "agent_role": role,
-                "reason": f"学生 {user.display_name} 通过 @{role} 主动召唤。",
-                "strategy": "优先回应该同学的提问，并给出可继续讨论的下一步。",
+                "reason": f"Student {user.display_name} mentioned @{role}.",
+                "strategy": "Prioritize responding to this student and provide a concrete next step.",
                 "priority": cfg.mention.priority,
                 "trigger_type": "mention",
                 "target_dimension": "user_request",
@@ -186,7 +233,26 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
                 "triggered_at": time.time(),
             },
         )
+        log_agent_debug(
+            "agent_enqueue_done",
+            {
+                "room_id": room_id,
+                "source_message_id": source_message_id,
+                "agent_role": role,
+                "task_id": task.get("task_id"),
+                "queue_key": queue_key(room_id),
+            },
+        )
 
+        log_agent_debug(
+            "agent_queued_broadcast_start",
+            {
+                "room_id": room_id,
+                "source_message_id": source_message_id,
+                "agent_role": role,
+                "task_id": task.get("task_id"),
+            },
+        )
         await manager.broadcast_to_room(
             room_id,
             {
@@ -195,7 +261,16 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
                 "source_message_id": source_message_id,
                 "status": "queued",
                 "task_id": task["task_id"],
-                "message": "已进入处理队列。",
+                "message": "Agent request queued.",
+            },
+        )
+        log_agent_debug(
+            "agent_queued_broadcast_done",
+            {
+                "room_id": room_id,
+                "source_message_id": source_message_id,
+                "agent_role": role,
+                "task_id": task.get("task_id"),
             },
         )
 

@@ -12,6 +12,16 @@ const MESSAGE_BURST = Number(process.env.WS_MESSAGE_BURST || 1)
 const MESSAGE_CONTENT_SIZE = Number(process.env.WS_MESSAGE_CONTENT_SIZE || 50)
 const WS_EXPECT_BROADCAST = String(process.env.WS_EXPECT_BROADCAST || 'true').toLowerCase() === 'true'
 const WS_MESSAGE_TEST_MODE = process.env.WS_MESSAGE_TEST_MODE || 'normal_chat'
+const WS_AGENT_ROLE = process.env.WS_AGENT_ROLE || 'facilitator'
+const WS_AGENT_MENTION_INTERVAL_MS = Number(process.env.WS_AGENT_MENTION_INTERVAL_MS || 60000)
+const WS_AGENT_MENTION_ROOMS = Number(process.env.WS_AGENT_MENTION_ROOMS || 1)
+const WS_AGENT_MENTION_PER_ROOM = Number(process.env.WS_AGENT_MENTION_PER_ROOM || 1)
+const WS_AGENT_EXPECT_REPLY = String(process.env.WS_AGENT_EXPECT_REPLY || 'true').toLowerCase() === 'true'
+const WS_AGENT_REPLY_TIMEOUT_MS = Number(process.env.WS_AGENT_REPLY_TIMEOUT_MS || 120000)
+const WS_AGENT_MENTION_STAGGER_MS = Number(process.env.WS_AGENT_MENTION_STAGGER_MS || 0)
+const WS_AGENT_MENTION_JITTER_MS = Number(process.env.WS_AGENT_MENTION_JITTER_MS || 0)
+const WS_AGENT_MENTION_BATCH_SIZE = Number(process.env.WS_AGENT_MENTION_BATCH_SIZE || 0)
+const WS_AGENT_MENTION_BATCH_INTERVAL_MS = Number(process.env.WS_AGENT_MENTION_BATCH_INTERVAL_MS || 0)
 const BASE_URL = (process.env.BASE_URL || 'http://localhost:5173').replace(/\/$/, '')
 const API_BASE_URL = (process.env.API_BASE_URL || 'http://localhost:8001/api').replace(/\/$/, '')
 const RAW_WS_BASE_URL = (process.env.WS_BASE_URL || 'ws://localhost:8001').replace(/\/$/, '')
@@ -64,6 +74,7 @@ const stats = {
   lifetimeBuckets: { lt1s: 0, s1to5: 0, s5to10: 0, gte10: 0 },
   closeSecondBucket: {},
   messageSentSecondBucket: {},
+  mentionSentSecondBucket: {},
   messageBroadcastSeenSecondBucket: {},
   messagesSent: 0,
   messagesBroadcastSeen: 0,
@@ -74,6 +85,28 @@ const stats = {
   closeAround45: [],
   failedRoomIds: new Set(),
   failedUsernames: new Set(),
+  mentionMessagesSent: 0,
+  mentionMessagesBroadcastSeen: 0,
+  agentAckSeen: 0,
+  agentQueuedSeen: 0,
+  agentTypingSeen: 0,
+  agentStreamSeen: 0,
+  agentStreamEndSeen: 0,
+  agentReplySeen: 0,
+  agentDroppedSeen: 0,
+  agentFailedSeen: 0,
+  agentUnsupportedSeen: 0,
+  ackLatencies: [],
+  queuedLatencies: [],
+  firstTokenLatencies: [],
+  replyLatencies: [],
+  droppedReasons: {},
+  failedReasons: {},
+  mentionById: {},
+  mentionBySourceMessageId: {},
+  mentionIdBySourceMessageId: {},
+  mentionTimeoutIds: [],
+  mentionTargetRooms: [],
 }
 
 function percentile(arr, p) {
@@ -96,6 +129,22 @@ function buildMessageContent(base) {
   if (base.length >= MESSAGE_CONTENT_SIZE) return base
   const filler = 'x'.repeat(Math.max(0, MESSAGE_CONTENT_SIZE - base.length))
   return `${base}${filler}`
+}
+
+function markMentionFinal(mention, status, reason = '') {
+  if (!mention) return
+  if (['replied', 'dropped', 'failed', 'timeout'].includes(mention.finalStatus)) return
+  mention.finalStatus = status
+  mention.finalReason = reason || ''
+}
+
+function noteMentionEvent(mention, event, ts, extra = {}) {
+  if (!mention) return
+  if (!mention.eventTypesSeen) mention.eventTypesSeen = []
+  if (!mention.recentEvents) mention.recentEvents = []
+  mention.eventTypesSeen.push(event)
+  mention.recentEvents.push({ event, ts, ...extra })
+  if (mention.recentEvents.length > 10) mention.recentEvents.shift()
 }
 
 function toWsUrl(baseUrl, roomId) {
@@ -342,8 +391,68 @@ function printSummary(extra, setupMeta) {
 
   const roomHealth = Object.fromEntries(Object.entries(stats.roomConnectionCount).map(([roomId, v]) => [roomId, v.openAliveAtEnd]))
   const allRoomsHaveSurvivor = Object.values(roomHealth).every((v) => v >= 1)
+  const ackP50 = percentile(stats.ackLatencies, 50)
+  const ackP95 = percentile(stats.ackLatencies, 95)
+  const ackMax = stats.ackLatencies.length ? Math.max(...stats.ackLatencies) : 0
+  const queuedP50 = percentile(stats.queuedLatencies, 50)
+  const queuedP95 = percentile(stats.queuedLatencies, 95)
+  const queuedMax = stats.queuedLatencies.length ? Math.max(...stats.queuedLatencies) : 0
+  const firstTokenP50 = percentile(stats.firstTokenLatencies, 50)
+  const firstTokenP95 = percentile(stats.firstTokenLatencies, 95)
+  const firstTokenMax = stats.firstTokenLatencies.length ? Math.max(...stats.firstTokenLatencies) : 0
+  const replyP50 = percentile(stats.replyLatencies, 50)
+  const replyP95 = percentile(stats.replyLatencies, 95)
+  const replyMax = stats.replyLatencies.length ? Math.max(...stats.replyLatencies) : 0
+  const sourceMessageIdResolvedCount = Object.values(stats.mentionById).filter((m) => !!m.sourceMessageId).length
+  const mentionFinalStates = Object.fromEntries(
+    Object.entries(stats.mentionById).map(([mentionId, m]) => [
+      mentionId,
+      {
+        roomId: m.roomId,
+        username: m.username,
+        sourceMessageId: m.sourceMessageId,
+        chatBroadcastSeen: !!m.chatBroadcastSeen,
+        sourceMessageIdResolved: !!m.sourceMessageIdResolved,
+        typingSeen: !!m.typingSeen,
+        streamingSeen: !!m.streamingSeen,
+        streamEndSeen: !!m.streamEndSeen,
+        eventTypesSeen: m.eventTypesSeen || [],
+        recentEvents: (m.recentEvents || []).slice(-10),
+        finalStatus: m.finalStatus,
+        finalReason: m.finalReason || '',
+      },
+    ])
+  )
+  const mentionTimeoutDiagnostics = Object.fromEntries(
+    Object.entries(stats.mentionById)
+      .filter(([, m]) => m.finalStatus === 'timeout')
+      .map(([mentionId, m]) => [
+        mentionId,
+        {
+          chatBroadcastSeen: !!m.chatBroadcastSeen,
+          sourceMessageIdResolved: !!m.sourceMessageIdResolved,
+          sourceMessageId: m.sourceMessageId,
+          typingSeen: !!m.typingSeen,
+          streamingSeen: !!m.streamingSeen,
+          streamEndSeen: !!m.streamEndSeen,
+          eventTypesSeen: m.eventTypesSeen || [],
+          recentEvents: (m.recentEvents || []).slice(-10),
+        },
+      ])
+  )
+  const mentionCount = Object.keys(stats.mentionById).length
+  const mentionAckRate = mentionCount ? stats.agentAckSeen / mentionCount : 1
+  const mentionQueuedRate = mentionCount ? stats.agentQueuedSeen / mentionCount : 1
+  const mentionFinalResolved = Object.values(stats.mentionById).filter((m) =>
+    ['replied', 'dropped', 'failed'].includes(m.finalStatus)
+  ).length
+  const mentionFinalStatusDist = Object.values(stats.mentionById).reduce((acc, m) => {
+    const key = m.finalStatus || 'unknown'
+    acc[key] = (acc[key] || 0) + 1
+    return acc
+  }, {})
 
-  const pass =
+  const basePass =
     openRate >= 0.95 &&
     stats.authCloseCounts[4001] === 0 &&
     stats.authCloseCounts[4002] === 0 &&
@@ -351,6 +460,17 @@ function printSummary(extra, setupMeta) {
     code1006Rate < 0.01 &&
     allRoomsHaveSurvivor &&
     !stats.fourSecondPattern
+
+  let pass = basePass
+  if (WS_MESSAGE_TEST_MODE === 'mention_agent') {
+    pass =
+      basePass &&
+      mentionCount > 0 &&
+      mentionAckRate >= 0.95 &&
+      mentionQueuedRate >= 0.95 &&
+      mentionFinalResolved === mentionCount &&
+      stats.mentionTimeoutIds.length === 0
+  }
 
   console.log('[WS-LOAD] summary', {
     mode: WS_MODE,
@@ -378,6 +498,7 @@ function printSummary(extra, setupMeta) {
     byUsernameCloseCodeDist: stats.perUsernameCloseCodeDist,
     byCloseSecondBucket: stats.closeSecondBucket,
     byMessageSentSecondBucket: stats.messageSentSecondBucket,
+    byMentionSentSecondBucket: stats.mentionSentSecondBucket,
     byMessageBroadcastSeenSecondBucket: stats.messageBroadcastSeenSecondBucket,
     byLifetimeBucket: stats.lifetimeBuckets,
     messagesSent: stats.messagesSent,
@@ -396,6 +517,33 @@ function printSummary(extra, setupMeta) {
     registerSummary: setupMeta.registerSummary,
     perUsernameUseCount: stats.perUsernameUseCount,
     roomStudentAssignments: stats.roomStudentAssignments,
+    mentionTargetRooms: stats.mentionTargetRooms,
+    mentionMessagesSent: stats.mentionMessagesSent,
+    mentionMessagesBroadcastSeen: stats.mentionMessagesBroadcastSeen,
+    sourceMessageIdResolvedCount,
+    agentAckSeen: stats.agentAckSeen,
+    agentQueuedSeen: stats.agentQueuedSeen,
+    agentTypingSeen: stats.agentTypingSeen,
+    agentStreamSeen: stats.agentStreamSeen,
+    agentStreamEndSeen: stats.agentStreamEndSeen,
+    agentReplySeen: stats.agentReplySeen,
+    agentDroppedSeen: stats.agentDroppedSeen,
+    agentFailedSeen: stats.agentFailedSeen,
+    agentUnsupportedSeen: stats.agentUnsupportedSeen,
+    ackLatencyMs: { p50: ackP50, p95: ackP95, max: ackMax },
+    queuedLatencyMs: { p50: queuedP50, p95: queuedP95, max: queuedMax },
+    firstTokenLatencyMs: { p50: firstTokenP50, p95: firstTokenP95, max: firstTokenMax },
+    replyLatencyMs: { p50: replyP50, p95: replyP95, max: replyMax },
+    mentionFinalStates,
+    mentionFinalStatusDist,
+    mentionTimeoutIds: stats.mentionTimeoutIds,
+    mentionTimeoutDiagnostics,
+    droppedReasons: stats.droppedReasons,
+    failedReasons: stats.failedReasons,
+    dbPoolTimeoutSeen: 'unknown_from_script',
+    redisErrorSeen: 'unknown_from_script',
+    llmFailedSeen: stats.agentFailedSeen > 0,
+    queueStuckSuspected: mentionCount > 0 && mentionFinalResolved < mentionCount && stats.code1006 === 0,
     connectionDetailsSample: stats.connectionDetails.slice(0, 20),
     closeAround45Sample: stats.closeAround45.slice(0, 30),
     failedRoomIds: [...stats.failedRoomIds],
@@ -464,6 +612,16 @@ async function main() {
     MESSAGE_CONTENT_SIZE,
     WS_EXPECT_BROADCAST,
     WS_MESSAGE_TEST_MODE,
+    WS_AGENT_ROLE,
+    WS_AGENT_MENTION_INTERVAL_MS,
+    WS_AGENT_MENTION_ROOMS,
+    WS_AGENT_MENTION_PER_ROOM,
+    WS_AGENT_EXPECT_REPLY,
+    WS_AGENT_REPLY_TIMEOUT_MS,
+    WS_AGENT_MENTION_STAGGER_MS,
+    WS_AGENT_MENTION_JITTER_MS,
+    WS_AGENT_MENTION_BATCH_SIZE,
+    WS_AGENT_MENTION_BATCH_INTERVAL_MS,
     BASE_URL,
     API_BASE_URL,
     WS_BASE_URL,
@@ -553,6 +711,9 @@ async function main() {
   const connections = []
   const startTs = now()
   const endTs = startTs + DURATION_MS
+  const mentionTargetRooms = roomIds.slice(0, Math.max(0, Math.min(WS_AGENT_MENTION_ROOMS, roomIds.length)))
+  stats.mentionTargetRooms = mentionTargetRooms
+  const mentionRoomOrder = new Map(mentionTargetRooms.map((roomId, idx) => [roomId, idx]))
 
   for (const roomId of roomIds) {
     for (let i = 0; i < STUDENTS_PER_ROOM; i += 1) {
@@ -593,6 +754,9 @@ async function main() {
         seq: 0,
         inFlight: 0,
         messageStartHandle: null,
+        mentionSentCount: 0,
+        mentionTimer: null,
+        mentionTimeoutHandles: new Set(),
       }
 
       const connect = () => {
@@ -619,6 +783,7 @@ async function main() {
             conn.ws.send(presencePayload)
 
             if (!WS_SEND_MESSAGES) return
+            if (WS_MESSAGE_TEST_MODE === 'mention_agent') return
             if (conn.inFlight >= MESSAGE_MAX_IN_FLIGHT_PER_CONNECTION) return
             for (let burst = 0; burst < MESSAGE_BURST; burst += 1) {
               if (conn.inFlight >= MESSAGE_MAX_IN_FLIGHT_PER_CONNECTION) break
@@ -644,6 +809,127 @@ async function main() {
                 seenCount: 0,
               }
             }
+          }
+
+          const sendMentionMessage = () => {
+            if (!conn.ws || conn.ws.readyState !== WebSocket.OPEN) return
+            if (WS_MESSAGE_TEST_MODE !== 'mention_agent') return
+            if (!mentionTargetRooms.includes(roomId)) return
+            if (conn.mentionSentCount >= WS_AGENT_MENTION_PER_ROOM) return
+            if (i >= WS_AGENT_MENTION_PER_ROOM) return
+
+            conn.mentionSentCount += 1
+            const mentionId = `mention:${roomId}:${studentUsername}:${now()}`
+            const content = `@${WS_AGENT_ROLE} 请帮助我们推进讨论 ${mentionId}`
+            const payload = {
+              type: 'chat:message',
+              content,
+              mentions: [WS_AGENT_ROLE],
+            }
+            const sentAt = now()
+            stats.mentionMessagesSent += 1
+            stats.messagesSent += 1
+            const sentSec = closeSecond(startTs, sentAt)
+            stats.messageSentSecondBucket[sentSec] = (stats.messageSentSecondBucket[sentSec] || 0) + 1
+            stats.mentionSentSecondBucket[sentSec] = (stats.mentionSentSecondBucket[sentSec] || 0) + 1
+            stats.sentMessageIds.add(mentionId)
+
+            const mentionState = {
+              mentionId,
+              roomId,
+              username: studentUsername,
+              connectionId: connId,
+              sentAt,
+              sourceMessageId: null,
+              ackAt: null,
+              queuedAt: null,
+              typingAt: null,
+              firstStreamAt: null,
+              streamEndAt: null,
+              replyAt: null,
+              droppedAt: null,
+              failedAt: null,
+              unsupportedAt: null,
+              timeoutAt: null,
+              chatBroadcastSeen: false,
+              sourceMessageIdResolved: false,
+              typingSeen: false,
+              streamingSeen: false,
+              streamEndSeen: false,
+              state: 'sent',
+              finalStatus: 'sent',
+              finalReason: '',
+              eventTypesSeen: [],
+              recentEvents: [],
+            }
+            stats.mentionById[mentionId] = mentionState
+            noteMentionEvent(mentionState, 'sent', sentAt)
+
+            conn.ws.send(JSON.stringify(payload))
+            const timeoutHandle = trackTimeout(
+              setTimeout(() => {
+                clearTrackedTimeout(timeoutHandle)
+                conn.mentionTimeoutHandles.delete(timeoutHandle)
+                const current = stats.mentionById[mentionId]
+                if (!current) return
+                if (!['replied', 'dropped', 'failed'].includes(current.finalStatus)) {
+                  current.timeoutAt = now()
+                  current.state = 'timeout'
+                  noteMentionEvent(current, 'timeout', current.timeoutAt, { reason: 'reply_timeout' })
+                  markMentionFinal(current, 'timeout', 'reply_timeout')
+                  stats.mentionTimeoutIds.push(mentionId)
+                }
+              }, WS_AGENT_REPLY_TIMEOUT_MS)
+            )
+            conn.mentionTimeoutHandles.add(timeoutHandle)
+          }
+
+          const scheduleInitialMentionSend = () => {
+            if (WS_MESSAGE_TEST_MODE !== 'mention_agent') return
+            if (!mentionTargetRooms.includes(roomId)) return
+            if (i >= WS_AGENT_MENTION_PER_ROOM) return
+
+            const order = mentionRoomOrder.get(roomId) ?? 0
+            let delay = 0
+            if (WS_AGENT_MENTION_BATCH_SIZE > 0 && WS_AGENT_MENTION_BATCH_INTERVAL_MS > 0) {
+              const batchIdx = Math.floor(order / WS_AGENT_MENTION_BATCH_SIZE)
+              const posInBatch = order % WS_AGENT_MENTION_BATCH_SIZE
+              delay = batchIdx * WS_AGENT_MENTION_BATCH_INTERVAL_MS + posInBatch * Math.max(0, WS_AGENT_MENTION_STAGGER_MS)
+            } else {
+              delay = order * Math.max(0, WS_AGENT_MENTION_STAGGER_MS)
+            }
+            delay += jitterDelay(Math.max(0, WS_AGENT_MENTION_JITTER_MS))
+            if (delay > 0) {
+              const h = trackTimeout(
+                setTimeout(() => {
+                  clearTrackedTimeout(h)
+                  sendMentionMessage()
+                }, delay)
+              )
+              conn.mentionTimeoutHandles.add(h)
+            } else {
+              sendMentionMessage()
+            }
+          }
+
+          const scheduleMentionTicker = () => {
+            if (WS_MESSAGE_TEST_MODE !== 'mention_agent') return
+            if (WS_AGENT_MENTION_PER_ROOM <= 1) return
+            conn.mentionTimer = trackInterval(
+              setInterval(() => {
+                const delay = jitterDelay(MESSAGE_JITTER_MS)
+                if (delay > 0) {
+                  const h = trackTimeout(
+                    setTimeout(() => {
+                      clearTrackedTimeout(h)
+                      sendMentionMessage()
+                    }, delay)
+                  )
+                } else {
+                  sendMentionMessage()
+                }
+              }, WS_AGENT_MENTION_INTERVAL_MS)
+            )
           }
 
           const scheduleTicker = () => {
@@ -672,11 +958,15 @@ async function main() {
                 clearTrackedTimeout(conn.messageStartHandle)
                 conn.messageStartHandle = null
                 sendPresenceAndMessages()
+                scheduleInitialMentionSend()
+                scheduleMentionTicker()
                 if (MESSAGE_INTERVAL_MS > 0) scheduleTicker()
               }, startStagger)
             )
           } else {
             sendPresenceAndMessages()
+            scheduleInitialMentionSend()
+            scheduleMentionTicker()
             if (MESSAGE_INTERVAL_MS > 0) scheduleTicker()
           }
 
@@ -709,6 +999,230 @@ async function main() {
             payload = JSON.parse(text)
           } catch {
             payload = null
+          }
+          if (payload && payload.type === 'chat:new_message') {
+            const sourceMessageId = payload.source_message_id || payload.sourceMessageId || null
+            if (payload.sender_type === 'student' && typeof payload.content === 'string' && payload.content.includes('mention:')) {
+              let mentionId = null
+              for (const candidate of Object.keys(stats.mentionById)) {
+                if (payload.content.includes(candidate)) {
+                  mentionId = candidate
+                  break
+                }
+              }
+              if (!mentionId) {
+                const matchMention = payload.content.match(/mention:[^\s]+/)
+                mentionId = matchMention ? matchMention[0] : null
+              }
+              if (mentionId && stats.mentionById[mentionId]) {
+                const m = stats.mentionById[mentionId]
+                if (!m.chatBroadcastSeen) {
+                  m.chatBroadcastSeen = true
+                  m.state = m.state === 'sent' ? 'chatBroadcastSeen' : m.state
+                  stats.mentionMessagesBroadcastSeen += 1
+                }
+                noteMentionEvent(m, 'chat:new_message(student)', recvTs, { messageId: payload.id || null })
+                if (!m.sourceMessageId && payload.id) {
+                  m.sourceMessageId = String(payload.id)
+                  m.sourceMessageIdResolved = true
+                  m.state = 'sourceMessageIdResolved'
+                  stats.mentionBySourceMessageId[m.sourceMessageId] = m
+                  stats.mentionIdBySourceMessageId[m.sourceMessageId] = mentionId
+                  noteMentionEvent(m, 'source_message_id_resolved', recvTs, { sourceMessageId: m.sourceMessageId })
+                }
+              }
+            }
+            if (payload.sender_type === 'agent' && sourceMessageId && stats.mentionBySourceMessageId[String(sourceMessageId)]) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              if (!m.replyAt) {
+                m.replyAt = recvTs
+                stats.agentReplySeen += 1
+                stats.replyLatencies.push(recvTs - m.sentAt)
+              }
+              m.state = 'replied'
+              noteMentionEvent(m, 'chat:new_message(agent)', recvTs, { sourceMessageId: String(sourceMessageId) })
+              markMentionFinal(m, 'replied')
+            }
+          }
+          if (payload && payload.type === 'agent:ack') {
+            const sourceMessageId = payload.source_message_id || null
+            const status = payload.status || ''
+            if (sourceMessageId && stats.mentionBySourceMessageId[String(sourceMessageId)]) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              if (!m.ackAt) {
+                m.ackAt = recvTs
+                stats.agentAckSeen += 1
+                stats.ackLatencies.push(recvTs - m.sentAt)
+              }
+              m.state = 'acked'
+              noteMentionEvent(m, 'agent:ack', recvTs, { status })
+              if (status === 'unsupported') {
+                m.unsupportedAt = recvTs
+                stats.agentUnsupportedSeen += 1
+                markMentionFinal(m, 'failed', 'unsupported')
+              } else {
+                m.finalStatus = m.finalStatus === 'sent' ? 'acked' : m.finalStatus
+              }
+            }
+          }
+          if (payload && payload.type === 'agent:queued') {
+            const sourceMessageId = payload.source_message_id || null
+            if (sourceMessageId && stats.mentionBySourceMessageId[String(sourceMessageId)]) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              if (!m.queuedAt) {
+                m.queuedAt = recvTs
+                stats.agentQueuedSeen += 1
+                stats.queuedLatencies.push(recvTs - m.sentAt)
+              }
+              m.state = 'queued'
+              noteMentionEvent(m, 'agent:queued', recvTs, { taskId: payload.task_id || null })
+              m.finalStatus = m.finalStatus === 'sent' || m.finalStatus === 'acked' ? 'queued' : m.finalStatus
+            }
+          }
+          if (payload && payload.type === 'agent:typing') {
+            const sourceMessageId = payload.source_message_id || null
+            const eventRole = String(payload.agent_role || '').toLowerCase()
+            if (
+              sourceMessageId &&
+              stats.mentionBySourceMessageId[String(sourceMessageId)] &&
+              eventRole === String(WS_AGENT_ROLE).toLowerCase()
+            ) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              if (!m.typingAt) {
+                m.typingAt = recvTs
+                m.typingSeen = true
+                stats.agentTypingSeen += 1
+              }
+              m.state = 'typingSeen'
+              noteMentionEvent(m, 'agent:typing', recvTs)
+            }
+          }
+          if (payload && payload.type === 'agent:stream') {
+            const sourceMessageId = payload.source_message_id || null
+            const eventRole = String(payload.agent_role || '').toLowerCase()
+            if (
+              sourceMessageId &&
+              stats.mentionBySourceMessageId[String(sourceMessageId)] &&
+              eventRole === String(WS_AGENT_ROLE).toLowerCase()
+            ) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              if (!m.firstStreamAt) {
+                m.firstStreamAt = recvTs
+                m.streamingSeen = true
+                stats.agentStreamSeen += 1
+                stats.firstTokenLatencies.push(recvTs - m.sentAt)
+              }
+              m.state = 'streamingSeen'
+              noteMentionEvent(m, 'agent:stream', recvTs)
+            }
+          }
+          if (payload && payload.type === 'agent:queue_dropped') {
+            const sourceMessageId = payload.source_message_id || null
+            const reason = String(payload.reason || payload.message || payload.status || 'queue_dropped')
+            if (sourceMessageId && stats.mentionBySourceMessageId[String(sourceMessageId)]) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              m.droppedAt = recvTs
+              stats.agentDroppedSeen += 1
+              m.state = 'dropped'
+              noteMentionEvent(m, 'agent:queue_dropped', recvTs, { reason })
+              stats.droppedReasons[reason] = (stats.droppedReasons[reason] || 0) + 1
+              markMentionFinal(m, 'dropped', reason)
+            }
+          }
+          if (payload && payload.type === 'agent:stream_end') {
+            const sourceMessageId = payload.source_message_id || null
+            const eventRole = String(payload.agent_role || '').toLowerCase()
+            const status = String(payload.status || '').toLowerCase()
+            const reason = String(payload.error || payload.reason || status || 'stream_end')
+            if (
+              sourceMessageId &&
+              stats.mentionBySourceMessageId[String(sourceMessageId)] &&
+              eventRole === String(WS_AGENT_ROLE).toLowerCase()
+            ) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              if (!m.streamEndAt) {
+                m.streamEndAt = recvTs
+                m.streamEndSeen = true
+                stats.agentStreamEndSeen += 1
+              }
+              noteMentionEvent(m, 'agent:stream_end', recvTs, { status, reason })
+              m.state = 'streamEndSeen'
+              if (status === 'ok') {
+                if (!m.replyAt) {
+                  m.replyAt = recvTs
+                  stats.agentReplySeen += 1
+                  stats.replyLatencies.push(recvTs - m.sentAt)
+                }
+                m.state = 'replied'
+                markMentionFinal(m, 'replied', '')
+              }
+              if (status === 'failed') {
+                m.failedAt = recvTs
+                stats.agentFailedSeen += 1
+                stats.failedReasons[reason] = (stats.failedReasons[reason] || 0) + 1
+                m.state = 'failed'
+                markMentionFinal(m, 'failed', reason)
+              }
+            }
+          }
+          if (payload && ['agent:reply', 'agent:done'].includes(payload.type)) {
+            const sourceMessageId = payload.source_message_id || null
+            const eventRole = String(payload.agent_role || '').toLowerCase()
+            if (
+              sourceMessageId &&
+              stats.mentionBySourceMessageId[String(sourceMessageId)] &&
+              eventRole === String(WS_AGENT_ROLE).toLowerCase()
+            ) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              if (!m.replyAt) {
+                m.replyAt = recvTs
+                stats.agentReplySeen += 1
+                stats.replyLatencies.push(recvTs - m.sentAt)
+              }
+              m.state = 'replied'
+              noteMentionEvent(m, payload.type, recvTs)
+              markMentionFinal(m, 'replied')
+            }
+          }
+          if (payload && payload.type === 'agent:failed') {
+            const sourceMessageId = payload.source_message_id || null
+            const eventRole = String(payload.agent_role || '').toLowerCase()
+            const reason = String(payload.error || payload.reason || payload.message || 'agent_failed')
+            if (
+              sourceMessageId &&
+              stats.mentionBySourceMessageId[String(sourceMessageId)] &&
+              eventRole === String(WS_AGENT_ROLE).toLowerCase()
+            ) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              m.failedAt = recvTs
+              stats.agentFailedSeen += 1
+              stats.failedReasons[reason] = (stats.failedReasons[reason] || 0) + 1
+              m.state = 'failed'
+              noteMentionEvent(m, 'agent:failed', recvTs, { reason })
+              markMentionFinal(m, 'failed', reason)
+            }
+          }
+          if (payload && payload.type === 'agent:dropped') {
+            const sourceMessageId = payload.source_message_id || null
+            const eventRole = String(payload.agent_role || '').toLowerCase()
+            const reason = String(payload.reason || payload.message || payload.status || 'agent_dropped')
+            if (
+              sourceMessageId &&
+              stats.mentionBySourceMessageId[String(sourceMessageId)] &&
+              eventRole === String(WS_AGENT_ROLE).toLowerCase()
+            ) {
+              const m = stats.mentionBySourceMessageId[String(sourceMessageId)]
+              m.droppedAt = recvTs
+              stats.agentDroppedSeen += 1
+              stats.droppedReasons[reason] = (stats.droppedReasons[reason] || 0) + 1
+              m.state = 'dropped'
+              noteMentionEvent(m, 'agent:dropped', recvTs, { reason })
+              markMentionFinal(m, 'dropped', reason)
+            }
+          }
+          if (payload && payload.type === 'agent:mention_blocked') {
+            const reason = String(payload.reason || payload.message || 'mention_blocked')
+            stats.failedReasons[reason] = (stats.failedReasons[reason] || 0) + 1
           }
           if (payload && payload.type === 'chat:new_message' && typeof payload.content === 'string' && payload.content.includes('loadmsg:')) {
             const match = payload.content.match(/loadmsg:[^\s]+/)
@@ -743,10 +1257,14 @@ async function main() {
           }
 
           clearTrackedInterval(conn.timer)
+          clearTrackedInterval(conn.mentionTimer)
           clearTrackedTimeout(conn.messageStartHandle)
           clearTrackedTimeout(conn.alive5Handle)
           clearTrackedTimeout(conn.alive10Handle)
+          for (const h of conn.mentionTimeoutHandles) clearTrackedTimeout(h)
+          conn.mentionTimeoutHandles.clear()
           conn.timer = null
+          conn.mentionTimer = null
           conn.messageStartHandle = null
           conn.alive5Handle = null
           conn.alive10Handle = null
@@ -817,10 +1335,14 @@ async function main() {
       }
     }
     clearTrackedInterval(conn.timer)
+    clearTrackedInterval(conn.mentionTimer)
     clearTrackedTimeout(conn.messageStartHandle)
     clearTrackedTimeout(conn.alive5Handle)
     clearTrackedTimeout(conn.alive10Handle)
+    for (const h of conn.mentionTimeoutHandles) clearTrackedTimeout(h)
+    conn.mentionTimeoutHandles.clear()
     conn.timer = null
+    conn.mentionTimer = null
     conn.alive5Handle = null
     conn.alive10Handle = null
     try {
