@@ -31,6 +31,7 @@ from app.services import writing_submit_service
 scheduler = AsyncIOScheduler()
 TIME_NODE_MINUTES = (15, 35, 55, 75, 88)
 TIME_NODE_LOCK_TTL_SECONDS = 4 * 3600
+SILENCE_EPISODE_MARKER_TTL_SECONDS = 4 * 3600
 
 
 def _decode_room_id(value) -> str:
@@ -181,11 +182,11 @@ async def check_silence() -> None:
     )
 
     for room_id in active_rooms:
+        last_msg_time = await redis_client.get(f"room:{room_id}:last_msg_time")
         last_activity_time = await redis_client.get(f"room:{room_id}:last_activity_time")
-        if not last_activity_time:
-            # Backward compatibility: older rooms may only have chat timestamp.
-            last_activity_time = await redis_client.get(f"room:{room_id}:last_msg_time")
-        if not last_activity_time:
+        episode_anchor = last_msg_time or last_activity_time
+        anchor_source = "last_msg_time" if last_msg_time else "last_activity_time"
+        if not episode_anchor:
             continue
 
         elapsed_seconds = await get_elapsed_seconds_from_timer_start(room_id)
@@ -195,7 +196,7 @@ async def check_silence() -> None:
         if elapsed_seconds < warmup_seconds:
             continue
 
-        silence = now - float(last_activity_time)
+        silence = now - float(episode_anchor)
         if silence < cfg.timing.silence_threshold_seconds:
             continue
 
@@ -211,11 +212,40 @@ async def check_silence() -> None:
         if await redis_client.exists(lock_key):
             continue
 
+        episode_marker_key = f"silence_triggered_activity:{room_id}"
+        episode_marker_val = await redis_client.get(episode_marker_key)
+        if episode_marker_val and str(episode_marker_val) == str(episode_anchor):
+            _scheduler_log(
+                "silence_skip_same_episode",
+                {
+                    "room_id": room_id,
+                    "episode_anchor": str(episode_anchor),
+                    "anchor_source": anchor_source,
+                    "marker_value": str(episode_marker_val),
+                    "silence_seconds": int(silence),
+                },
+            )
+            continue
+
         await redis_client.setex(lock_key, lock_ttl, "1")
         await redis_client.setex(recent_rule_key, silence_rule_ttl, "1")
+        await redis_client.setex(
+            episode_marker_key,
+            SILENCE_EPISODE_MARKER_TTL_SECONDS,
+            str(episode_anchor),
+        )
         _scheduler_log(
             "silence_set_recent_rule_trigger",
             {"room_id": room_id, "ttl": silence_rule_ttl, "silence_seconds": int(silence)},
+        )
+        _scheduler_log(
+            "silence_set_episode_marker",
+            {
+                "room_id": room_id,
+                "episode_anchor": str(episode_anchor),
+                "anchor_source": anchor_source,
+                "ttl": SILENCE_EPISODE_MARKER_TTL_SECONDS,
+            },
         )
         await enqueue_task(
             room_id,
