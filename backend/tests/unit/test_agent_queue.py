@@ -8,6 +8,7 @@ class _FakeRedis:
         self._z = {}
         self._h = {}
         self._exp = {}
+        self._pub = []
 
     async def zadd(self, key, mapping):
         bucket = self._z.setdefault(key, {})
@@ -42,6 +43,10 @@ class _FakeRedis:
     async def expire(self, _key, _ttl):
         self._exp[_key] = _ttl
         return True
+
+    async def publish(self, channel, payload):
+        self._pub.append((channel, payload))
+        return 1
 
 
 @pytest.mark.asyncio
@@ -84,6 +89,32 @@ async def test_enqueue_writes_queued_task_status(monkeypatch):
     assert status.get("agent_role") == "facilitator"
     assert status.get("source_message_id") == "msg-1"
     assert fake_redis._exp.get(key) == agent_queue.TASK_STATUS_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_enqueue_silence_broadcasts_agent_queued(monkeypatch):
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(agent_queue, "get_redis_client", lambda: fake_redis)
+
+    task = await agent_queue.enqueue_task(
+        "room-auto-1",
+        {
+            "task_id": "task-auto-queued-1",
+            "agent_role": "facilitator",
+            "trigger_type": "silence",
+            "reason": "silence reached threshold",
+            "priority": 2,
+            "triggered_at": 1.0,
+        },
+    )
+
+    assert task["task_id"] == "task-auto-queued-1"
+    assert fake_redis._pub
+    payload = fake_redis._pub[-1][1]
+    assert '"type": "agent:queued"' in payload
+    assert '"task_id": "task-auto-queued-1"' in payload
+    assert '"trigger_type": "silence"' in payload
+    assert '"status": "queued"' in payload
 
 
 @pytest.mark.asyncio

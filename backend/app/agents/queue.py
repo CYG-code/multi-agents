@@ -115,6 +115,34 @@ async def enqueue_task(room_id: str, task: dict, delay_seconds: float = 0.0) -> 
         queued_at=now_iso(),
         created_at=str(normalized.get("created_at") or normalized.get("triggered_at") or now_iso()),
     )
+    # For auto triggers (silence/committee/time_progress/...) we also emit queued events,
+    # so clients can observe a full lifecycle before stream events arrive.
+    trigger_type = str(normalized.get("trigger_type") or "manual").strip().lower()
+    if trigger_type != "mention":
+        queued_payload = {
+            "type": "agent:queued",
+            "task_id": str(normalized.get("task_id") or ""),
+            "room_id": room_id,
+            "agent_role": str(normalized.get("agent_role") or ""),
+            "trigger_type": trigger_type,
+            "source_message_id": normalized.get("source_message_id"),
+            "reason": str(normalized.get("reason") or ""),
+            "status": "queued",
+        }
+        try:
+            await redis_client.publish(f"room:{room_id}", json.dumps(queued_payload, ensure_ascii=False))
+        except Exception as exc:
+            _agent_log(
+                "agent_queued_broadcast_failed",
+                {
+                    "task_id": normalized.get("task_id"),
+                    "room_id": room_id,
+                    "agent_role": normalized.get("agent_role"),
+                    "trigger_type": trigger_type,
+                    "exception_class": type(exc).__name__,
+                    "exception_message": str(exc),
+                },
+            )
     qlen = int(await redis_client.zcard(qkey))
     _agent_log(
         "agent_enqueue_done",

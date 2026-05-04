@@ -178,6 +178,22 @@ class _ErrorAgent:
         raise RuntimeError("boom")
 
 
+class _BlockingAgent:
+    def __init__(self, started_event: asyncio.Event, release_event: asyncio.Event, counter: dict):
+        self.started_event = started_event
+        self.release_event = release_event
+        self.counter = counter
+
+    async def generate_and_push(self, **_kwargs):
+        self.counter["running"] += 1
+        self.counter["max_running"] = max(self.counter["max_running"], self.counter["running"])
+        self.started_event.set()
+        try:
+            await self.release_event.wait()
+        finally:
+            self.counter["running"] -= 1
+
+
 async def _fake_set_task_status(**_kwargs):
     return None
 
@@ -259,7 +275,7 @@ async def test_worker_marks_timeout_terminal_status_when_agent_generation_times_
         },
     )
 
-    assert any('"type": "agent:failed"' in msg for _, msg in fake_redis.publish_calls)
+    assert any('"type": "agent:timeout"' in msg for _, msg in fake_redis.publish_calls)
     assert any(call.get("status") == "timeout" and call.get("reason") == "worker_timeout" for call in status_calls)
     assert "room:r3:agent_lock" in fake_redis.delete_calls
 
@@ -384,4 +400,142 @@ async def test_worker_releases_lock_when_agent_raises(monkeypatch):
         await worker._execute_task("r7", {"agent_role": "resource_finder", "trigger_type": "mention"})
 
     assert "room:r7:agent_lock" in fake_redis.delete_calls
+
+
+@pytest.mark.asyncio
+async def test_worker_global_concurrency_limit_one_requeues_extra_task(monkeypatch):
+    fake_redis = _FakeRedis()
+    requeued = []
+    started_event = asyncio.Event()
+    release_event = asyncio.Event()
+    counter = {"running": 0, "max_running": 0}
+
+    class _CfgTimingOne:
+        global_intervention_limit_per_hour = 99
+        agent_cooldown_seconds = 0
+        room_auto_intervention_cooldown_seconds = 180
+        agent_response_timeout_seconds = 5
+        agent_global_concurrency_limit = 1
+
+    class _CfgOne:
+        timing = _CfgTimingOne()
+        auto_speak = None
+
+    async def _fake_context(_room_id):
+        return {"current_phase": "middle"}
+
+    async def _fake_history(_room_id):
+        return []
+
+    async def _fake_requeue(_room_id, _task, delay_seconds=0):
+        requeued.append((_room_id, delay_seconds))
+
+    monkeypatch.setattr(agent_worker, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(agent_worker, "get_agent_settings", lambda: _CfgOne())
+    monkeypatch.setattr(agent_worker, "set_task_status", _fake_set_task_status)
+    monkeypatch.setattr(agent_worker, "get_room_context", _fake_context)
+    monkeypatch.setattr(agent_worker, "get_recent_messages", _fake_history)
+    monkeypatch.setattr(agent_worker, "requeue_task", _fake_requeue)
+    monkeypatch.setattr(
+        agent_worker,
+        "ROLE_AGENTS",
+        {"resource_finder": _BlockingAgent(started_event, release_event, counter)},
+    )
+    agent_worker.AgentWorker._global_semaphore = None
+    agent_worker.AgentWorker._global_semaphore_limit = 0
+
+    worker = agent_worker.AgentWorker()
+    task1 = asyncio.create_task(
+        worker._execute_task("r8", {"agent_role": "resource_finder", "trigger_type": "mention", "task_id": "t1"})
+    )
+    await started_event.wait()
+    await worker._execute_task("r9", {"agent_role": "resource_finder", "trigger_type": "mention", "task_id": "t2"})
+    release_event.set()
+    await task1
+
+    assert counter["max_running"] == 1
+    assert requeued == [("r9", 2)]
+
+
+@pytest.mark.asyncio
+async def test_worker_global_token_released_after_exception(monkeypatch):
+    fake_redis = _FakeRedis()
+    status_calls = []
+
+    class _CfgTimingOne:
+        global_intervention_limit_per_hour = 99
+        agent_cooldown_seconds = 0
+        room_auto_intervention_cooldown_seconds = 180
+        agent_response_timeout_seconds = 5
+        agent_global_concurrency_limit = 1
+
+    class _CfgOne:
+        timing = _CfgTimingOne()
+        auto_speak = None
+
+    async def _fake_context(_room_id):
+        return {"current_phase": "middle"}
+
+    async def _fake_history(_room_id):
+        return []
+
+    async def _capture_set_task_status(**kwargs):
+        status_calls.append(kwargs)
+
+    monkeypatch.setattr(agent_worker, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(agent_worker, "get_agent_settings", lambda: _CfgOne())
+    monkeypatch.setattr(agent_worker, "set_task_status", _capture_set_task_status)
+    monkeypatch.setattr(agent_worker, "get_room_context", _fake_context)
+    monkeypatch.setattr(agent_worker, "get_recent_messages", _fake_history)
+    monkeypatch.setattr(agent_worker, "ROLE_AGENTS", {"resource_finder": _ErrorAgent()})
+    agent_worker.AgentWorker._global_semaphore = None
+    agent_worker.AgentWorker._global_semaphore_limit = 0
+
+    worker = agent_worker.AgentWorker()
+    with pytest.raises(RuntimeError):
+        await worker._execute_task("r10", {"agent_role": "resource_finder", "trigger_type": "mention", "task_id": "t-ex-1"})
+
+    monkeypatch.setattr(agent_worker, "ROLE_AGENTS", {"resource_finder": _DummyAgent()})
+    await worker._execute_task("r10", {"agent_role": "resource_finder", "trigger_type": "mention", "task_id": "t-ex-2"})
+
+    assert any(call.get("task_id") == "t-ex-1" and call.get("status") == "failed" for call in status_calls)
+    assert any(call.get("task_id") == "t-ex-2" and call.get("status") == "running" for call in status_calls)
+
+
+@pytest.mark.asyncio
+async def test_worker_broadcasts_running_for_silence_without_source_message_id(monkeypatch):
+    fake_redis = _FakeRedis()
+    status_calls = []
+
+    async def _fake_context(_room_id):
+        return {"current_phase": "middle"}
+
+    async def _fake_history(_room_id):
+        return []
+
+    async def _capture_set_task_status(**kwargs):
+        status_calls.append(kwargs)
+
+    monkeypatch.setattr(agent_worker, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(agent_worker, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(agent_worker, "set_task_status", _capture_set_task_status)
+    monkeypatch.setattr(agent_worker, "get_room_context", _fake_context)
+    monkeypatch.setattr(agent_worker, "get_recent_messages", _fake_history)
+    monkeypatch.setattr(agent_worker, "ROLE_AGENTS", {"facilitator": _DummyAgent()})
+
+    worker = agent_worker.AgentWorker()
+    await worker._execute_task(
+        "r11",
+        {
+            "agent_role": "facilitator",
+            "trigger_type": "silence",
+            "task_id": "t-silence-running-1",
+            "reason": "silence",
+        },
+    )
+
+    assert any('"type": "agent:running"' in msg for _, msg in fake_redis.publish_calls)
+    assert any('"task_id": "t-silence-running-1"' in msg for _, msg in fake_redis.publish_calls)
+    assert any('"trigger_type": "silence"' in msg for _, msg in fake_redis.publish_calls)
+    assert any(call.get("task_id") == "t-silence-running-1" and call.get("status") == "running" for call in status_calls)
 

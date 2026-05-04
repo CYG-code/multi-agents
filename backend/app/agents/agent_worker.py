@@ -34,8 +34,26 @@ def _agent_log(event: str, extra: dict | None = None) -> None:
 
 
 class AgentWorker:
+    _global_semaphore: asyncio.Semaphore | None = None
+    _global_semaphore_limit: int = 0
+
     def __init__(self):
         self._running = False
+
+    @classmethod
+    def _ensure_global_semaphore(cls, limit: int) -> asyncio.Semaphore:
+        safe_limit = max(1, int(limit))
+        if cls._global_semaphore is None or cls._global_semaphore_limit != safe_limit:
+            cls._global_semaphore = asyncio.Semaphore(safe_limit)
+            cls._global_semaphore_limit = safe_limit
+        return cls._global_semaphore
+
+    @classmethod
+    def _global_running_count(cls) -> int:
+        if cls._global_semaphore is None:
+            return 0
+        available = int(getattr(cls._global_semaphore, "_value", cls._global_semaphore_limit))
+        return max(0, cls._global_semaphore_limit - available)
 
     async def run(self) -> None:
         self._running = True
@@ -195,6 +213,43 @@ class AgentWorker:
             await requeue_task(room_id, task, delay_seconds=5)
             return
         _agent_log("agent_lock_acquire_success", {"task_id": task_id, "room_id": room_id, "lock_key": lock_key})
+        acquired_global_token = False
+        global_limit = int(getattr(cfg.timing, "agent_global_concurrency_limit", 3))
+        semaphore = self._ensure_global_semaphore(global_limit)
+        _agent_log(
+            "agent_global_semaphore_acquire_start",
+            {
+                "task_id": task_id,
+                "room_id": room_id,
+                "limit": global_limit,
+                "running": self._global_running_count(),
+            },
+        )
+        if semaphore.locked():
+            _agent_log(
+                "agent_global_semaphore_acquire_wait",
+                {
+                    "task_id": task_id,
+                    "room_id": room_id,
+                    "limit": global_limit,
+                    "running": self._global_running_count(),
+                    "action": "requeue",
+                },
+            )
+            await requeue_task(room_id, task, delay_seconds=2)
+            return
+
+        await semaphore.acquire()
+        acquired_global_token = True
+        _agent_log(
+            "agent_global_semaphore_acquire_success",
+            {
+                "task_id": task_id,
+                "room_id": room_id,
+                "limit": global_limit,
+                "running": self._global_running_count(),
+            },
+        )
         await set_task_status(
             task_id=task_id,
             room_id=room_id,
@@ -210,6 +265,7 @@ class AgentWorker:
             task_id=task_id,
             agent_role=agent_role,
             source_message_id=source_message_id,
+            trigger_type=trigger_type,
             event_type="agent:running",
             status="running",
             message="Agent task is running.",
@@ -271,7 +327,8 @@ class AgentWorker:
                     task_id=task_id,
                     agent_role=agent_role,
                     source_message_id=source_message_id,
-                    event_type="agent:failed",
+                    trigger_type=trigger_type,
+                    event_type="agent:timeout",
                     status="timeout",
                     reason="worker_timeout",
                     message=f"Agent task timed out after {timeout_seconds}s.",
@@ -316,6 +373,7 @@ class AgentWorker:
                 task_id=task_id,
                 agent_role=agent_role,
                 source_message_id=source_message_id,
+                trigger_type=trigger_type,
                 event_type="agent:failed",
                 status="failed",
                 reason="worker_exception",
@@ -334,6 +392,17 @@ class AgentWorker:
             )
             raise
         finally:
+            if acquired_global_token:
+                semaphore.release()
+                _agent_log(
+                    "agent_global_semaphore_release",
+                    {
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "limit": global_limit,
+                        "running": self._global_running_count(),
+                    },
+                )
             current_lock = await redis_client.get(lock_key)
             if current_lock == WORKER_ID:
                 await redis_client.delete(lock_key)
@@ -349,15 +418,17 @@ class AgentWorker:
     ) -> None:
         source_message_id = task.get("source_message_id")
         agent_role = (task.get("agent_role") or "").strip().lower()
-        if not source_message_id or not agent_role:
+        if not agent_role:
             return
 
         payload = {
             "type": "agent:queue_dropped",
+            "room_id": room_id,
             "source_message_id": source_message_id,
             "agent_role": agent_role,
             "task_id": task.get("task_id"),
-            "status": "failed",
+            "trigger_type": str(task.get("trigger_type") or "manual"),
+            "status": "dropped",
             "reason": reason,
             "message": message,
         }
@@ -418,18 +489,21 @@ class AgentWorker:
         task_id: str,
         agent_role: str,
         source_message_id: str | None,
+        trigger_type: str,
         event_type: str,
         status: str,
         reason: str | None = None,
         message: str | None = None,
         error: str | None = None,
     ) -> None:
-        if not source_message_id or not agent_role:
+        if not agent_role:
             return
         payload = {
             "type": event_type,
+            "room_id": room_id,
             "task_id": task_id,
             "agent_role": agent_role,
+            "trigger_type": trigger_type,
             "source_message_id": source_message_id,
             "status": status,
         }

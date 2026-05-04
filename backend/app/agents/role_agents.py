@@ -260,6 +260,7 @@ class BaseRoleAgent(ABC):
                     room_id,
                     {
                         "type": "agent:stream",
+                        "task_id": str(task_id or ""),
                         "agent_role": self.ROLE,
                         "message_id": message_id,
                         "token": token,
@@ -346,6 +347,7 @@ class BaseRoleAgent(ABC):
                 room_id,
                 {
                     "type": "agent:stream_end",
+                    "task_id": str(task_id or ""),
                     "agent_role": self.ROLE,
                     "message_id": message_id,
                     "status": "ok" if success else "failed",

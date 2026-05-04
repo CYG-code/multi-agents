@@ -101,9 +101,14 @@ async def test_generate_and_push_success(monkeypatch):
         history=[{"display_name": "A", "content": "Hi"}],
         source_message_id="msg-1",
         trigger_type="mention",
+        task={"task_id": "task-role-success-1", "trigger_type": "mention", "reason": "r"},
     )
 
+    stream_payloads = [e for e in events if e["type"] == "agent:stream"]
+    assert stream_payloads
+    assert stream_payloads[-1]["task_id"] == "task-role-success-1"
     stream_end = [e for e in events if e["type"] == "agent:stream_end"][-1]
+    assert stream_end["task_id"] == "task-role-success-1"
     assert stream_end["status"] == "ok"
     assert stream_end["content"] == "hello world"
     assert stream_end["error"] is None
@@ -142,9 +147,11 @@ async def test_generate_and_push_generation_failure_includes_error(monkeypatch):
         history=[{"display_name": "A", "content": "Hi"}],
         source_message_id="msg-2",
         trigger_type="mention",
+        task={"task_id": "task-role-failed-1", "trigger_type": "mention", "reason": "r"},
     )
 
     stream_end = [e for e in events if e["type"] == "agent:stream_end"][-1]
+    assert stream_end["task_id"] == "task-role-failed-1"
     assert stream_end["status"] == "failed"
     assert stream_end["content"] == ""
     assert "Connection error." in (stream_end["error"] or "")
@@ -181,9 +188,11 @@ async def test_generate_and_push_db_update_failure_marks_failed(monkeypatch):
         history=[{"display_name": "A", "content": "Hi"}],
         source_message_id="msg-3",
         trigger_type="mention",
+        task={"task_id": "task-role-db-failed-1", "trigger_type": "mention", "reason": "r"},
     )
 
     stream_end = [e for e in events if e["type"] == "agent:stream_end"][-1]
+    assert stream_end["task_id"] == "task-role-db-failed-1"
     assert stream_end["status"] == "failed"
     assert "DB update failed" in (stream_end["error"] or "")
     assert any(s.get("status") == "failed" for s in status_updates)
