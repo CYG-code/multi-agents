@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import timezone
 from uuid import UUID
@@ -64,6 +65,13 @@ def _phase_label(elapsed_minutes: int) -> str:
     if elapsed_minutes < 70:
         return "middle"
     return "late"
+
+
+def _scheduler_log(event: str, extra: dict | None = None) -> None:
+    payload = {"event": event}
+    if extra:
+        payload.update(extra)
+    print(f"[Scheduler] {json.dumps(payload, ensure_ascii=False)}")
 
 
 def _assess_progress(
@@ -164,7 +172,13 @@ async def check_silence() -> None:
     now = time.time()
     warmup_seconds = cfg.timing.warmup_minutes * 60
     lock_ttl = cfg.timing.silence_threshold_seconds + 60
-    rule_marker_ttl = max(30, int(getattr(cfg.timing, "rule_trigger_marker_ttl_seconds", 180)))
+    base_rule_marker_ttl = max(30, int(getattr(cfg.timing, "rule_trigger_marker_ttl_seconds", 180)))
+    room_auto_cooldown = int(getattr(cfg.timing, "room_auto_intervention_cooldown_seconds", 180))
+    silence_rule_ttl = max(
+        base_rule_marker_ttl,
+        int(cfg.timing.silence_threshold_seconds) + 180,
+        room_auto_cooldown + 60,
+    )
 
     for room_id in active_rooms:
         last_activity_time = await redis_client.get(f"room:{room_id}:last_activity_time")
@@ -185,12 +199,24 @@ async def check_silence() -> None:
         if silence < cfg.timing.silence_threshold_seconds:
             continue
 
+        recent_rule_key = f"recent_rule_trigger:{room_id}:silence"
+        if await redis_client.exists(recent_rule_key):
+            _scheduler_log(
+                "silence_skip_recent_rule_trigger",
+                {"room_id": room_id, "ttl": silence_rule_ttl, "silence_seconds": int(silence)},
+            )
+            continue
+
         lock_key = f"trigger_lock:{room_id}:silence"
         if await redis_client.exists(lock_key):
             continue
 
         await redis_client.setex(lock_key, lock_ttl, "1")
-        await redis_client.setex(f"recent_rule_trigger:{room_id}:silence", rule_marker_ttl, "1")
+        await redis_client.setex(recent_rule_key, silence_rule_ttl, "1")
+        _scheduler_log(
+            "silence_set_recent_rule_trigger",
+            {"room_id": room_id, "ttl": silence_rule_ttl, "silence_seconds": int(silence)},
+        )
         await enqueue_task(
             room_id,
             {
