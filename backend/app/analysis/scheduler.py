@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from datetime import timezone
 from uuid import UUID
@@ -32,6 +33,7 @@ scheduler = AsyncIOScheduler()
 TIME_NODE_MINUTES = (15, 35, 55, 75, 88)
 TIME_NODE_LOCK_TTL_SECONDS = 4 * 3600
 SILENCE_EPISODE_MARKER_TTL_SECONDS = 4 * 3600
+TIME_PROGRESS_SCHEDULE_TTL_SECONDS = 30 * 60
 
 
 def _decode_room_id(value) -> str:
@@ -73,6 +75,25 @@ def _scheduler_log(event: str, extra: dict | None = None) -> None:
     if extra:
         payload.update(extra)
     print(f"[Scheduler] {json.dumps(payload, ensure_ascii=False)}")
+
+
+def _stable_time_progress_jitter_seconds(
+    *,
+    room_id: str,
+    node_minutes: int,
+    min_seconds: int,
+    max_seconds: int,
+) -> int:
+    low = int(min_seconds)
+    high = int(max_seconds)
+    if high < low:
+        low, high = high, low
+    if low == high:
+        return low
+    raw = f"{room_id}:{node_minutes}".encode("utf-8")
+    digest = hashlib.sha1(raw).hexdigest()
+    bucket = int(digest[:8], 16)
+    return low + (bucket % (high - low + 1))
 
 
 def _assess_progress(
@@ -293,6 +314,9 @@ async def check_time_progress_reminders() -> None:
     active_rooms = await redis_client.smembers("active_rooms")
     now = time.time()
     rule_marker_ttl = max(30, int(getattr(cfg.timing, "rule_trigger_marker_ttl_seconds", 180)))
+    jitter_enabled = bool(getattr(cfg.timing, "time_progress_jitter_enabled", True))
+    jitter_min_seconds = int(getattr(cfg.timing, "time_progress_jitter_min_seconds", 30))
+    jitter_max_seconds = int(getattr(cfg.timing, "time_progress_jitter_max_seconds", 90))
 
     for raw_room_id in active_rooms:
         room_id = _decode_room_id(raw_room_id)
@@ -321,6 +345,97 @@ async def check_time_progress_reminders() -> None:
         lock_key = f"trigger_lock:{room_id}:time_progress:{cycle_id}:{matched_node}"
         if await redis_client.exists(lock_key):
             continue
+
+        jitter_seconds = 0
+        due_at_for_log = None
+        if jitter_enabled:
+            schedule_key = f"time_progress_scheduled:{room_id}:{matched_node}"
+            scheduled_raw = await redis_client.get(schedule_key)
+            if not scheduled_raw:
+                jitter_seconds = _stable_time_progress_jitter_seconds(
+                    room_id=room_id,
+                    node_minutes=matched_node,
+                    min_seconds=jitter_min_seconds,
+                    max_seconds=jitter_max_seconds,
+                )
+                due_at = now + jitter_seconds
+                due_at_for_log = due_at
+                scheduled_payload = {
+                    "scheduled_at": now,
+                    "due_at": due_at,
+                    "node_minutes": matched_node,
+                    "jitter_seconds": jitter_seconds,
+                }
+                await redis_client.setex(
+                    schedule_key,
+                    TIME_PROGRESS_SCHEDULE_TTL_SECONDS,
+                    json.dumps(scheduled_payload, ensure_ascii=False),
+                )
+                _scheduler_log(
+                    "time_progress_schedule_jitter",
+                    {
+                        "room_id": room_id,
+                        "node_minutes": matched_node,
+                        "jitter_seconds": jitter_seconds,
+                        "due_at": due_at,
+                        "now": now,
+                    },
+                )
+                continue
+
+            due_at = None
+            try:
+                scheduled_obj = json.loads(str(scheduled_raw))
+                due_at = float(scheduled_obj.get("due_at"))
+                jitter_seconds = int(scheduled_obj.get("jitter_seconds") or 0)
+            except Exception:
+                due_at = None
+
+            if due_at is None:
+                jitter_seconds = _stable_time_progress_jitter_seconds(
+                    room_id=room_id,
+                    node_minutes=matched_node,
+                    min_seconds=jitter_min_seconds,
+                    max_seconds=jitter_max_seconds,
+                )
+                due_at = now + jitter_seconds
+                repaired_payload = {
+                    "scheduled_at": now,
+                    "due_at": due_at,
+                    "node_minutes": matched_node,
+                    "jitter_seconds": jitter_seconds,
+                }
+                await redis_client.setex(
+                    schedule_key,
+                    TIME_PROGRESS_SCHEDULE_TTL_SECONDS,
+                    json.dumps(repaired_payload, ensure_ascii=False),
+                )
+                _scheduler_log(
+                    "time_progress_schedule_jitter",
+                    {
+                        "room_id": room_id,
+                        "node_minutes": matched_node,
+                        "jitter_seconds": jitter_seconds,
+                        "due_at": due_at,
+                        "now": now,
+                    },
+                )
+                continue
+
+            if now < due_at:
+                due_at_for_log = due_at
+                _scheduler_log(
+                    "time_progress_wait_jitter_due",
+                    {
+                        "room_id": room_id,
+                        "node_minutes": matched_node,
+                        "jitter_seconds": jitter_seconds,
+                        "due_at": due_at,
+                        "now": now,
+                    },
+                )
+                continue
+            due_at_for_log = due_at
 
         last_activity_time = await redis_client.get(f"room:{room_id}:last_activity_time")
         if not last_activity_time:
@@ -351,6 +466,17 @@ async def check_time_progress_reminders() -> None:
 
         await redis_client.setex(lock_key, TIME_NODE_LOCK_TTL_SECONDS, "1")
         await redis_client.setex(f"recent_rule_trigger:{room_id}:time_progress", rule_marker_ttl, "1")
+        if jitter_enabled:
+            _scheduler_log(
+                "time_progress_jitter_due_enqueue",
+                {
+                    "room_id": room_id,
+                    "node_minutes": matched_node,
+                    "jitter_seconds": jitter_seconds,
+                    "due_at": due_at_for_log,
+                    "now": now,
+                },
+            )
         await enqueue_task(
             room_id,
             {

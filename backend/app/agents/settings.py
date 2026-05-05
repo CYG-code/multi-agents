@@ -28,6 +28,9 @@ class TimingConfig(BaseModel):
     mention_entry_queue_max_wait_sec: int = 60
     room_role_manual_mention_cooldown_sec: int = 30
     mention_entry_queue_max_size: int = 2000
+    time_progress_jitter_enabled: bool = True
+    time_progress_jitter_min_seconds: int = 30
+    time_progress_jitter_max_seconds: int = 90
 
 
 class ThresholdsConfig(BaseModel):

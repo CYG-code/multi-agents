@@ -14,6 +14,9 @@ timing:
   mention_entry_queue_max_wait_sec: 60
   room_role_manual_mention_cooldown_sec: 30
   mention_entry_queue_max_size: 2000
+  time_progress_jitter_enabled: true
+  time_progress_jitter_min_seconds: 30
+  time_progress_jitter_max_seconds: 90
 
 thresholds:
   diversity_score_threshold: 0.3
@@ -48,7 +51,7 @@ mention:
 auto_speak:
   facilitator_silence_enabled: true
   time_progress_enabled: true
-  committee_enabled: true
+  committee_enabled: false
   committee_recent_same_role_window: 2
   monopoly_encourager_enabled: true
   committee_devil_advocate_enabled: true

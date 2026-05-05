@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from app.analysis import scheduler
@@ -31,10 +33,14 @@ class _Timing:
     warmup_minutes = 3
     rule_trigger_marker_ttl_seconds = 180
     room_auto_intervention_cooldown_seconds = 180
+    time_progress_jitter_enabled = True
+    time_progress_jitter_min_seconds = 30
+    time_progress_jitter_max_seconds = 90
 
 
 class _AutoSpeak:
     facilitator_silence_enabled = True
+    time_progress_enabled = True
 
 
 class _Cfg:
@@ -335,3 +341,213 @@ async def test_check_silence_allows_new_episode_when_last_msg_changes(monkeypatc
 
     assert len(enqueued) == 1
     assert fake_redis._values[f"silence_triggered_activity:{room_id}"] == new_msg_anchor
+
+
+@pytest.mark.asyncio
+async def test_time_progress_jitter_schedules_without_immediate_enqueue(monkeypatch):
+    now = 1000.0
+    room_id = "tp-room-1"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={f"room:{room_id}:last_activity_time": str(now - 10)})
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_elapsed(_room_id):
+        return 15 * 60
+
+    async def _fake_snapshot(_room_id):
+        return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
+
+    async def _fake_submit_state(_room_id):
+        return {"confirmations": []}
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler.time, "time", lambda: now)
+    monkeypatch.setattr(scheduler, "get_elapsed_seconds_from_timer_start", _fake_elapsed)
+    monkeypatch.setattr(scheduler, "_load_room_snapshot", _fake_snapshot)
+    monkeypatch.setattr(scheduler.writing_submit_service, "get_writing_submit_state", _fake_submit_state)
+
+    await scheduler.check_time_progress_reminders()
+
+    assert enqueued == []
+    assert await fake_redis.exists(f"time_progress_scheduled:{room_id}:15")
+
+
+@pytest.mark.asyncio
+async def test_time_progress_jitter_waits_until_due_then_enqueue(monkeypatch):
+    base_now = 2000.0
+    room_id = "tp-room-2"
+    fake_redis = _FakeRedis(
+        active_rooms=[room_id],
+        values={
+            f"room:{room_id}:last_activity_time": str(base_now - 10),
+            f"time_progress_scheduled:{room_id}:15": '{"scheduled_at":1900.0,"due_at":2050.0,"node_minutes":15,"jitter_seconds":50}',
+        },
+    )
+    fake_redis._locks.add(f"time_progress_scheduled:{room_id}:15")
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_elapsed(_room_id):
+        return 15 * 60
+
+    async def _fake_snapshot(_room_id):
+        return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
+
+    async def _fake_submit_state(_room_id):
+        return {"confirmations": []}
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "get_elapsed_seconds_from_timer_start", _fake_elapsed)
+    monkeypatch.setattr(scheduler, "_load_room_snapshot", _fake_snapshot)
+    monkeypatch.setattr(scheduler.writing_submit_service, "get_writing_submit_state", _fake_submit_state)
+
+    monkeypatch.setattr(scheduler.time, "time", lambda: 2040.0)
+    await scheduler.check_time_progress_reminders()
+    assert enqueued == []
+
+    monkeypatch.setattr(scheduler.time, "time", lambda: 2051.0)
+    await scheduler.check_time_progress_reminders()
+    assert len(enqueued) == 1
+    assert enqueued[0][0] == room_id
+    assert enqueued[0][1]["trigger_type"] == "time_progress"
+
+
+@pytest.mark.asyncio
+async def test_time_progress_jitter_is_stable_for_same_room_and_node():
+    v1 = scheduler._stable_time_progress_jitter_seconds(
+        room_id="stable-room",
+        node_minutes=15,
+        min_seconds=30,
+        max_seconds=90,
+    )
+    v2 = scheduler._stable_time_progress_jitter_seconds(
+        room_id="stable-room",
+        node_minutes=15,
+        min_seconds=30,
+        max_seconds=90,
+    )
+    assert v1 == v2
+    assert 30 <= v1 <= 90
+
+
+@pytest.mark.asyncio
+async def test_time_progress_jitter_existing_schedule_does_not_reschedule(monkeypatch):
+    now = 3000.0
+    room_id = "tp-room-3"
+    original_payload = '{"scheduled_at":2900.0,"due_at":4000.0,"node_minutes":15,"jitter_seconds":60}'
+    fake_redis = _FakeRedis(
+        active_rooms=[room_id],
+        values={
+            f"room:{room_id}:last_activity_time": str(now - 10),
+            f"time_progress_scheduled:{room_id}:15": original_payload,
+        },
+    )
+    fake_redis._locks.add(f"time_progress_scheduled:{room_id}:15")
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_elapsed(_room_id):
+        return 15 * 60
+
+    async def _fake_snapshot(_room_id):
+        return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
+
+    async def _fake_submit_state(_room_id):
+        return {"confirmations": []}
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler.time, "time", lambda: now)
+    monkeypatch.setattr(scheduler, "get_elapsed_seconds_from_timer_start", _fake_elapsed)
+    monkeypatch.setattr(scheduler, "_load_room_snapshot", _fake_snapshot)
+    monkeypatch.setattr(scheduler.writing_submit_service, "get_writing_submit_state", _fake_submit_state)
+
+    await scheduler.check_time_progress_reminders()
+    assert enqueued == []
+    assert fake_redis._values[f"time_progress_scheduled:{room_id}:15"] == original_payload
+
+
+@pytest.mark.asyncio
+async def test_time_progress_lock_marker_prevents_duplicate_enqueue(monkeypatch):
+    now = 4000.0
+    room_id = "tp-room-4"
+    fake_redis = _FakeRedis(
+        active_rooms=[room_id],
+        values={f"room:{room_id}:last_activity_time": str(now - 10)},
+    )
+    fake_redis._locks.add(f"trigger_lock:{room_id}:time_progress:100:15")
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_elapsed(_room_id):
+        return 15 * 60
+
+    async def _fake_snapshot(_room_id):
+        return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
+
+    async def _fake_submit_state(_room_id):
+        return {"confirmations": []}
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler.time, "time", lambda: now)
+    monkeypatch.setattr(scheduler, "get_elapsed_seconds_from_timer_start", _fake_elapsed)
+    monkeypatch.setattr(scheduler, "_load_room_snapshot", _fake_snapshot)
+    monkeypatch.setattr(scheduler.writing_submit_service, "get_writing_submit_state", _fake_submit_state)
+
+    await scheduler.check_time_progress_reminders()
+    assert enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_time_progress_jitter_disabled_keeps_old_immediate_behavior(monkeypatch):
+    class _TimingNoJitter(_Timing):
+        time_progress_jitter_enabled = False
+
+    class _CfgNoJitter:
+        timing = _TimingNoJitter()
+        auto_speak = _AutoSpeak()
+
+    now = 5000.0
+    room_id = "tp-room-5"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={f"room:{room_id}:last_activity_time": str(now - 10)})
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_elapsed(_room_id):
+        return 15 * 60
+
+    async def _fake_snapshot(_room_id):
+        return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
+
+    async def _fake_submit_state(_room_id):
+        return {"confirmations": []}
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _CfgNoJitter())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler.time, "time", lambda: now)
+    monkeypatch.setattr(scheduler, "get_elapsed_seconds_from_timer_start", _fake_elapsed)
+    monkeypatch.setattr(scheduler, "_load_room_snapshot", _fake_snapshot)
+    monkeypatch.setattr(scheduler.writing_submit_service, "get_writing_submit_state", _fake_submit_state)
+
+    await scheduler.check_time_progress_reminders()
+
+    assert len(enqueued) == 1
+    assert enqueued[0][1]["trigger_type"] == "time_progress"
