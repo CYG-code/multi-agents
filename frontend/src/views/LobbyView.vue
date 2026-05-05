@@ -18,6 +18,9 @@
         <button class="rounded-lg border border-indigo-200 bg-white px-4 py-2 text-indigo-700 hover:bg-indigo-50" @click="openTemplateManagerModal">
           {{ TXT.manageTemplates }}
         </button>
+        <button class="rounded-lg border border-emerald-200 bg-white px-4 py-2 text-emerald-700 hover:bg-emerald-50" @click="goTeacherExports">
+          {{ TXT.exportData }}
+        </button>
         <button class="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700" @click="openCreateModal">
           + {{ TXT.createRoom }}
         </button>
@@ -319,6 +322,7 @@ const TXT = {
   logout: '\u9000\u51fa',
   createTemplate: '\u521b\u5efa\u6a21\u677f',
   manageTemplates: '\u7ba1\u7406\u6a21\u677f',
+  exportData: '\u5b9e\u9a8c\u6570\u636e\u5bfc\u51fa',
   createRoom: '\u521b\u5efa\u623f\u95f4',
   noRooms: '\u6682\u65e0\u623f\u95f4',
   loadingRooms: '\u623f\u95f4\u52a0\u8f7d\u4e2d...',
@@ -443,6 +447,10 @@ onMounted(async () => {
 function logout() {
   authStore.logout()
   router.push('/login')
+}
+
+function goTeacherExports() {
+  router.push('/teacher/exports')
 }
 
 async function fetchRooms() {

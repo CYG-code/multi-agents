@@ -14,6 +14,11 @@ const routes = [
     component: () => import('../views/RoomView.vue'),
     meta: { requiresAuth: true },
   },
+  {
+    path: '/teacher/exports',
+    component: () => import('../views/TeacherExportView.vue'),
+    meta: { requiresAuth: true, requiresTeacher: true },
+  },
 ]
 
 const router = createRouter({
