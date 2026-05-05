@@ -36,6 +36,26 @@ class _Timing:
     time_progress_jitter_enabled = True
     time_progress_jitter_min_seconds = 30
     time_progress_jitter_max_seconds = 90
+    emotional_support_enabled = True
+    emotional_support_check_interval_seconds = 30
+    emotional_support_keywords = [
+        "不会",
+        "不知道",
+        "太难",
+        "好难",
+        "算了",
+        "烦",
+        "好烦",
+        "没人说",
+        "随便",
+        "不想",
+        "没意思",
+        "做不下去",
+        "卡住",
+        "放弃",
+    ]
+    emotional_support_recent_window_seconds = 120
+    emotional_support_cooldown_seconds = 180
 
 
 class _AutoSpeak:
@@ -551,3 +571,198 @@ async def test_time_progress_jitter_disabled_keeps_old_immediate_behavior(monkey
 
     assert len(enqueued) == 1
     assert enqueued[0][1]["trigger_type"] == "time_progress"
+
+
+@pytest.mark.asyncio
+async def test_emotional_support_enqueues_encourager_on_keyword(monkeypatch):
+    room_id = "emo-room-1"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={})
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_recent_students(_room_id, _window):
+        return [
+            {
+                "id": "msg-1",
+                "user_id": "u-1",
+                "content": "我不想做了，好烦",
+                "created_at": 0.0,
+            }
+        ]
+
+    async def _fake_has_recent_encourager(_room_id, _window):
+        return False
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "_load_recent_student_messages", _fake_recent_students)
+    monkeypatch.setattr(scheduler, "_has_recent_encourager_reply", _fake_has_recent_encourager)
+
+    await scheduler.check_emotional_support()
+
+    assert len(enqueued) == 1
+    assert enqueued[0][0] == room_id
+    assert enqueued[0][1]["agent_role"] == "encourager"
+    assert enqueued[0][1]["trigger_type"] == "emotional_support"
+
+
+@pytest.mark.asyncio
+async def test_emotional_support_no_keyword_no_enqueue(monkeypatch):
+    room_id = "emo-room-2"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={})
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_recent_students(_room_id, _window):
+        return [{"id": "msg-2", "user_id": "u-2", "content": "我们继续", "created_at": 0.0}]
+
+    async def _fake_has_recent_encourager(_room_id, _window):
+        return False
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "_load_recent_student_messages", _fake_recent_students)
+    monkeypatch.setattr(scheduler, "_has_recent_encourager_reply", _fake_has_recent_encourager)
+
+    await scheduler.check_emotional_support()
+    assert enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_emotional_support_skip_when_cooldown_exists(monkeypatch):
+    room_id = "emo-room-3"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={})
+    fake_redis._locks.add(f"recent_rule_trigger:{room_id}:emotional_support")
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_recent_students(_room_id, _window):
+        return [{"id": "msg-3", "user_id": "u-3", "content": "太难了", "created_at": 0.0}]
+
+    async def _fake_has_recent_encourager(_room_id, _window):
+        return False
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "_load_recent_student_messages", _fake_recent_students)
+    monkeypatch.setattr(scheduler, "_has_recent_encourager_reply", _fake_has_recent_encourager)
+
+    await scheduler.check_emotional_support()
+    assert enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_emotional_support_skip_when_recent_encourager_exists(monkeypatch):
+    room_id = "emo-room-4"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={})
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_recent_students(_room_id, _window):
+        return [{"id": "msg-4", "user_id": "u-4", "content": "不知道怎么做", "created_at": 0.0}]
+
+    async def _fake_has_recent_encourager(_room_id, _window):
+        return True
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "_load_recent_student_messages", _fake_recent_students)
+    monkeypatch.setattr(scheduler, "_has_recent_encourager_reply", _fake_has_recent_encourager)
+
+    await scheduler.check_emotional_support()
+    assert enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_emotional_support_agent_message_keyword_does_not_trigger(monkeypatch):
+    room_id = "emo-room-5"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={})
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_recent_students(_room_id, _window):
+        return []
+
+    async def _fake_has_recent_encourager(_room_id, _window):
+        return False
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "_load_recent_student_messages", _fake_recent_students)
+    monkeypatch.setattr(scheduler, "_has_recent_encourager_reply", _fake_has_recent_encourager)
+
+    await scheduler.check_emotional_support()
+    assert enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_emotional_support_skip_when_disabled(monkeypatch):
+    class _TimingDisabled(_Timing):
+        emotional_support_enabled = False
+
+    class _CfgDisabled:
+        timing = _TimingDisabled()
+        auto_speak = _AutoSpeak()
+
+    room_id = "emo-room-6"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={})
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_recent_students(_room_id, _window):
+        return [{"id": "msg-6", "user_id": "u-6", "content": "不想", "created_at": 0.0}]
+
+    async def _fake_has_recent_encourager(_room_id, _window):
+        return False
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _CfgDisabled())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "_load_recent_student_messages", _fake_recent_students)
+    monkeypatch.setattr(scheduler, "_has_recent_encourager_reply", _fake_has_recent_encourager)
+
+    await scheduler.check_emotional_support()
+    assert enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_emotional_support_skip_when_trigger_lock_exists(monkeypatch):
+    room_id = "emo-room-7"
+    fake_redis = _FakeRedis(active_rooms=[room_id], values={})
+    fake_redis._locks.add(f"trigger_lock:{room_id}:emotional_support")
+    enqueued = []
+
+    async def _fake_enqueue(room_id_arg, payload):
+        enqueued.append((room_id_arg, payload))
+
+    async def _fake_recent_students(_room_id, _window):
+        return [{"id": "msg-7", "user_id": "u-7", "content": "太难", "created_at": 0.0}]
+
+    async def _fake_has_recent_encourager(_room_id, _window):
+        return False
+
+    monkeypatch.setattr(scheduler, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(scheduler, "get_agent_settings", lambda: _Cfg())
+    monkeypatch.setattr(scheduler, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(scheduler, "_load_recent_student_messages", _fake_recent_students)
+    monkeypatch.setattr(scheduler, "_has_recent_encourager_reply", _fake_has_recent_encourager)
+
+    await scheduler.check_emotional_support()
+    assert enqueued == []

@@ -31,6 +31,28 @@ class TimingConfig(BaseModel):
     time_progress_jitter_enabled: bool = True
     time_progress_jitter_min_seconds: int = 30
     time_progress_jitter_max_seconds: int = 90
+    emotional_support_enabled: bool = True
+    emotional_support_check_interval_seconds: int = 30
+    emotional_support_keywords: list[str] = Field(
+        default_factory=lambda: [
+            "不会",
+            "不知道",
+            "太难",
+            "好难",
+            "算了",
+            "烦",
+            "好烦",
+            "没人说",
+            "随便",
+            "不想",
+            "没意思",
+            "做不下去",
+            "卡住",
+            "放弃",
+        ]
+    )
+    emotional_support_recent_window_seconds: int = 120
+    emotional_support_cooldown_seconds: int = 180
 
 
 class ThresholdsConfig(BaseModel):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import time
-from datetime import timezone
+from datetime import datetime, timezone
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -25,6 +25,7 @@ from app.agents.settings import get_agent_settings
 from app.analysis.timer_phase import get_elapsed_seconds_from_timer_start
 from app.db.redis_client import cleanup_stale_online_presence, get_redis_client
 from app.db.session import AsyncSessionLocal
+from app.models.message import Message, SenderType
 from app.models.room import Room
 from app.models.task import Task
 from app.services import writing_submit_service
@@ -34,6 +35,7 @@ TIME_NODE_MINUTES = (15, 35, 55, 75, 88)
 TIME_NODE_LOCK_TTL_SECONDS = 4 * 3600
 SILENCE_EPISODE_MARKER_TTL_SECONDS = 4 * 3600
 TIME_PROGRESS_SCHEDULE_TTL_SECONDS = 30 * 60
+EMOTIONAL_SUPPORT_LOCK_TTL_SECONDS = 60
 
 
 def _decode_room_id(value) -> str:
@@ -147,6 +149,14 @@ def _build_time_nudge_text(
     return reason, strategy
 
 
+def _match_emotional_support_keyword(content: str, keywords: list[str]) -> str | None:
+    text = str(content or "")
+    for kw in keywords:
+        if kw and kw in text:
+            return kw
+    return None
+
+
 async def _load_room_snapshot(room_id: str) -> dict | None:
     try:
         parsed_room_id = UUID(room_id)
@@ -179,6 +189,61 @@ async def _load_room_snapshot(room_id: str) -> dict | None:
         "timer_started_at": timer_started_at,
         "script_state": _normalize_script_value(row.task_scripts),
     }
+
+
+async def _load_recent_student_messages(room_id: str, window_seconds: int) -> list[dict]:
+    try:
+        parsed_room_id = UUID(room_id)
+    except (ValueError, TypeError):
+        return []
+    cutoff_ts = time.time() - max(1, int(window_seconds))
+    cutoff = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Message.id, Message.sender_id, Message.content, Message.created_at)
+            .where(Message.room_id == parsed_room_id)
+            .where(Message.sender_type == SenderType.student)
+            .where(Message.created_at >= cutoff)
+            .order_by(Message.created_at.desc())
+            .limit(30)
+        )
+        rows = result.all()
+
+    out = []
+    for row in rows:
+        created_at = row.created_at
+        if created_at is None:
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        out.append(
+            {
+                "id": str(row.id),
+                "user_id": str(row.sender_id) if row.sender_id else "",
+                "content": str(row.content or ""),
+                "created_at": created_at.timestamp(),
+            }
+        )
+    return out
+
+
+async def _has_recent_encourager_reply(room_id: str, window_seconds: int) -> bool:
+    try:
+        parsed_room_id = UUID(room_id)
+    except (ValueError, TypeError):
+        return False
+    cutoff_ts = time.time() - max(1, int(window_seconds))
+    cutoff = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Message.id)
+            .where(Message.room_id == parsed_room_id)
+            .where(Message.sender_type == SenderType.agent)
+            .where(Message.agent_role == "encourager")
+            .where(Message.created_at >= cutoff)
+            .limit(1)
+        )
+        return result.first() is not None
 
 
 async def check_silence() -> None:
@@ -501,6 +566,113 @@ async def check_time_progress_reminders() -> None:
         )
 
 
+async def check_emotional_support() -> None:
+    cfg = get_agent_settings()
+    timing = cfg.timing
+    if not bool(getattr(timing, "emotional_support_enabled", True)):
+        _scheduler_log("emotional_support_skip_disabled", {})
+        return
+
+    redis_client = get_redis_client()
+    active_rooms = await redis_client.smembers("active_rooms")
+    keywords = list(getattr(timing, "emotional_support_keywords", []) or [])
+    window_seconds = int(getattr(timing, "emotional_support_recent_window_seconds", 120))
+    cooldown_seconds = int(getattr(timing, "emotional_support_cooldown_seconds", 180))
+
+    for raw_room_id in active_rooms:
+        room_id = _decode_room_id(raw_room_id)
+        if not room_id:
+            continue
+
+        lock_key = f"trigger_lock:{room_id}:emotional_support"
+        if await redis_client.exists(lock_key):
+            continue
+
+        recent_key = f"recent_rule_trigger:{room_id}:emotional_support"
+        if await redis_client.exists(recent_key):
+            _scheduler_log(
+                "emotional_support_skip_cooldown",
+                {"room_id": room_id, "cooldown_seconds": cooldown_seconds},
+            )
+            continue
+
+        if await _has_recent_encourager_reply(room_id, window_seconds):
+            _scheduler_log(
+                "emotional_support_skip_recent_encourager",
+                {"room_id": room_id, "cooldown_seconds": cooldown_seconds},
+            )
+            continue
+
+        recent_students = await _load_recent_student_messages(room_id, window_seconds)
+        matched = None
+        for msg in recent_students:
+            kw = _match_emotional_support_keyword(msg.get("content", ""), keywords)
+            if kw:
+                matched = (msg, kw)
+                break
+
+        if not matched:
+            continue
+
+        msg, keyword = matched
+        _scheduler_log(
+            "emotional_support_keyword_matched",
+            {
+                "room_id": room_id,
+                "keyword": keyword,
+                "message_id": msg.get("id", ""),
+                "user_id": msg.get("user_id", ""),
+                "cooldown_seconds": cooldown_seconds,
+            },
+        )
+
+        await redis_client.setex(lock_key, EMOTIONAL_SUPPORT_LOCK_TTL_SECONDS, "1")
+        await redis_client.setex(recent_key, cooldown_seconds, "1")
+        await redis_client.setex(
+            f"emotional_support:last_matched:{room_id}",
+            max(cooldown_seconds, 60),
+            json.dumps(
+                {
+                    "message_id": msg.get("id", ""),
+                    "user_id": msg.get("user_id", ""),
+                    "keyword": keyword,
+                    "matched_at": time.time(),
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        _scheduler_log(
+            "emotional_support_enqueue",
+            {
+                "room_id": room_id,
+                "keyword": keyword,
+                "message_id": msg.get("id", ""),
+                "user_id": msg.get("user_id", ""),
+                "cooldown_seconds": cooldown_seconds,
+            },
+        )
+        await enqueue_task(
+            room_id,
+            {
+                "room_id": room_id,
+                "agent_role": "encourager",
+                "trigger_type": "emotional_support",
+                "reason": "检测到学生可能存在挫败或消极情绪，需要给予情绪支持。",
+                "strategy": "用鼓励式、低压力的问题回应学生情绪，帮助学生重新表达困难，并邀请同伴支持。",
+                "priority": 1,
+                "target_dimension": "emotional",
+                "evidence": [
+                    f"keyword={keyword}",
+                    f"message_id={msg.get('id', '')}",
+                    f"user_id={msg.get('user_id', '')}",
+                ],
+                "triggered_at": time.time(),
+                "current_phase": "middle",
+            },
+        )
+
+
 async def check_online_presence_cleanup() -> None:
     await cleanup_stale_online_presence(stale_seconds=120)
 
@@ -523,6 +695,13 @@ def start_scheduler() -> None:
         "interval",
         minutes=max(1, cfg.timing.analysis_interval_minutes),
         id="check_committee",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_emotional_support,
+        "interval",
+        seconds=max(5, int(getattr(cfg.timing, "emotional_support_check_interval_seconds", 30))),
+        id="check_emotional_support",
         replace_existing=True,
     )
     scheduler.add_job(
