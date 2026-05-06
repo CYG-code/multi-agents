@@ -458,10 +458,19 @@ class EncouragerAgent(BaseRoleAgent):
     SKILL_DIR = "encourager"
 
 
+class ConceptExplainerAgent(BaseRoleAgent):
+    ROLE = "concept_explainer"
+    ROLE_DISPLAY_NAME = "概念解释员"
+    PROMPT_FILE = "concept_explainer.txt"
+    SKILL_DIR = "concept_explainer"
+    MAX_TOKENS = 700
+
+
 ROLE_AGENTS: dict[str, BaseRoleAgent] = {
     "facilitator": FacilitatorAgent(),
     "devil_advocate": DevilAdvocateAgent(),
     "summarizer": SummarizerAgent(),
     "resource_finder": ResourceFinderAgent(),
     "encourager": EncouragerAgent(),
+    "concept_explainer": ConceptExplainerAgent(),
 }

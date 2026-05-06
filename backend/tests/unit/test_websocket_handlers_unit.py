@@ -202,6 +202,69 @@ async def test_trigger_mentions_entry_queue_path_creates_entry_and_no_queued(mon
 
 
 @pytest.mark.asyncio
+async def test_trigger_mentions_accepts_concept_explainer(monkeypatch):
+    calls = []
+    enqueued = []
+    user = User(
+        id=uuid.uuid4(),
+        username="student_1",
+        password_hash="x",
+        display_name="Student 1",
+        role=UserRole.student,
+    )
+
+    async def _fake_broadcast(room_id, payload):
+        calls.append((room_id, payload))
+
+    async def _fake_enqueue(room_id, task, delay_seconds=0):
+        enqueued.append((room_id, task, delay_seconds))
+        return {"task_id": "task-concept-1", **task}
+
+    async def _fake_create_entry(**kwargs):
+        return {"entry_id": "entry-1", **kwargs}
+
+    class _Mention:
+        enabled = True
+        priority = 0
+        max_mentions_per_message = 1
+
+    class _Timing:
+        mention_entry_enabled = False
+        mention_entry_queue_max_wait_sec = 60
+
+    class _Cfg:
+        mention = _Mention()
+        timing = _Timing()
+
+    monkeypatch.setattr(handlers.manager, "broadcast_to_room", _fake_broadcast)
+    monkeypatch.setattr(handlers, "enqueue_task", _fake_enqueue)
+    monkeypatch.setattr(handlers, "create_mention_entry", _fake_create_entry)
+    monkeypatch.setattr(handlers, "get_agent_settings", lambda: _Cfg())
+
+    await handlers._trigger_mentions(
+        room_id="room-1",
+        source_message_id="msg-1",
+        user=user,
+        mentions=["concept_explainer"],
+    )
+
+    ack_payload = next(payload for _, payload in calls if payload.get("type") == "agent:ack")
+    assert ack_payload["agent_role"] == "concept_explainer"
+    assert ack_payload["status"] == "accepted"
+
+    queued_payload = next(payload for _, payload in calls if payload.get("type") == "agent:queued")
+    assert queued_payload["agent_role"] == "concept_explainer"
+    assert queued_payload["status"] == "queued"
+
+    assert len(enqueued) == 1
+    task_payload = enqueued[0][1]
+    assert task_payload["agent_role"] == "concept_explainer"
+    assert task_payload["trigger_type"] == "mention"
+    assert task_payload["target_dimension"] == "user_request"
+    assert task_payload["source_message_id"] == "msg-1"
+
+
+@pytest.mark.asyncio
 async def test_handle_chat_message_broadcasts_and_triggers(monkeypatch):
     created_at = datetime.now(timezone.utc)
     msg = SimpleNamespace(

@@ -81,11 +81,12 @@ const { connect, on, send, disconnect, connected } = useWebSocket(roomId)
 const { handleTyping, handleStream, handleStreamEnd } = useAgentStream()
 
 const ROLE_NAMES = {
-  facilitator: 'Facilitator',
-  devil_advocate: 'Devil Advocate',
-  summarizer: 'Summarizer',
-  resource_finder: 'Resource Finder',
-  encourager: 'Encourager',
+  facilitator: '主持人',
+  devil_advocate: '批判者',
+  summarizer: '总结者',
+  resource_finder: '资源检索者',
+  encourager: '鼓励者',
+  concept_explainer: '概念解释员',
 }
 
 const invokeStatusList = computed(() => {

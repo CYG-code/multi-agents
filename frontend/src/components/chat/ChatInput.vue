@@ -28,7 +28,7 @@
           v-if="showMentionPanel"
           class="absolute bottom-12 left-0 z-20 w-52 rounded-xl border border-gray-200 bg-white p-2 shadow-lg"
         >
-          <p class="px-2 py-1 text-xs text-gray-500">Choose an agent</p>
+          <p class="px-2 py-1 text-xs text-gray-500">选择智能体</p>
           <button
             v-for="agent in AGENT_OPTIONS"
             :key="agent.role"
@@ -44,7 +44,7 @@
       <textarea
         v-model="inputText"
         @keydown="handleKeydown"
-        placeholder="Type message, Enter to send"
+        placeholder="输入消息，回车发送"
         rows="2"
         class="flex-1 resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
       />
@@ -53,7 +53,7 @@
         class="rounded-xl bg-blue-500 px-4 py-2 text-sm text-white transition-colors hover:bg-blue-600"
         @click="sendMessage"
       >
-        Send
+        发送
       </button>
     </div>
   </div>
@@ -80,11 +80,12 @@ const props = defineProps({
 const emit = defineEmits(['send'])
 
 const AGENT_OPTIONS = [
-  { role: 'facilitator', label: 'Facilitator' },
-  { role: 'devil_advocate', label: 'Devil Advocate' },
-  { role: 'summarizer', label: 'Summarizer' },
-  { role: 'resource_finder', label: 'Resource Finder' },
-  { role: 'encourager', label: 'Encourager' },
+  { role: 'facilitator', label: '主持人' },
+  { role: 'devil_advocate', label: '批判者' },
+  { role: 'summarizer', label: '总结者' },
+  { role: 'resource_finder', label: '资源检索者' },
+  { role: 'encourager', label: '鼓励者' },
+  { role: 'concept_explainer', label: '概念解释员' },
 ]
 
 const inputText = ref('')

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
 
@@ -207,3 +207,34 @@ def test_devil_advocate_includes_skill_spec_in_system_prompt():
 
     assert "[Skill Spec]" in prompt
     assert "devil-advocate-skill" in prompt
+
+
+def test_concept_explainer_registered_and_prompt_builds():
+    assert "concept_explainer" in role_agents.ROLE_AGENTS
+    agent = role_agents.ROLE_AGENTS["concept_explainer"]
+    assert agent.ROLE_DISPLAY_NAME == "概念解释员"
+    assert agent.PROMPT_FILE == "concept_explainer.txt"
+
+    prompt = agent.build_system_prompt(
+        context={
+            "task_description": "三人小组围绕社会关键两难议题进行协作问题解决。",
+            "task_workflow": "理解问题—提出立场—比较理由—形成方案。",
+            "members_info": "学生A、学生B、学生C",
+            "current_phase": "问题理解阶段",
+        },
+        task={
+            "trigger_type": "mention",
+            "reason": "学生主动询问难懂概念。",
+            "strategy": "用通俗语言解释学生提到的概念，并给出一个可继续讨论的小问题。",
+            "student_name": "学生A",
+        },
+    )
+
+    assert "概念解释员" in prompt
+    assert "降低认知负荷" in prompt
+    assert "不要直接替学生生成最终答案" in prompt
+    assert "通俗易懂" in prompt
+    assert "问题理解阶段" in prompt
+    assert "学生主动询问难懂概念。" in prompt
+    assert "用通俗语言解释学生提到的概念，并给出一个可继续讨论的小问题。" in prompt
+    assert "Do not provide a complete final answer for the group." in prompt
