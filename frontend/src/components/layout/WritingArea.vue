@@ -9,23 +9,79 @@
       <button
         type="button"
         class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
-        @mousedown.prevent="applyCommand('bold')"
+        @mousedown.prevent="applyFormatBlock('p')"
+      >
+        正文
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="applyFormatBlock('h1')"
+      >
+        H1
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="applyFormatBlock('h2')"
+      >
+        H2
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="applyInlineFormat('strong')"
       >
         加粗
       </button>
       <button
         type="button"
         class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
-        @mousedown.prevent="applyCommand('italic')"
+        @mousedown.prevent="applyInlineFormat('em')"
       >
         斜体
       </button>
       <button
         type="button"
         class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
-        @mousedown.prevent="applyCommand('underline')"
+        @mousedown.prevent="applyInlineFormat('u')"
       >
         下划线
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="applyCommand('insertUnorderedList')"
+      >
+        无序列表
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="applyCommand('insertOrderedList')"
+      >
+        有序列表
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="applyCommand('justifyLeft')"
+      >
+        左对齐
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="applyCommand('justifyCenter')"
+      >
+        居中
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="applyCommand('justifyRight')"
+      >
+        右对齐
       </button>
       <button
         type="button"
@@ -41,6 +97,27 @@
           @click.stop
           @input.stop="handleColorChange"
         />
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="clearFormat"
+      >
+        清除格式
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="undoOnce"
+      >
+        撤销
+      </button>
+      <button
+        type="button"
+        class="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-100"
+        @mousedown.prevent="redoOnce"
+      >
+        重做
       </button>
       <button
         class="ml-auto rounded border border-emerald-200 bg-white px-2 py-1 text-xs text-emerald-600 hover:bg-emerald-50 disabled:opacity-60"
@@ -66,6 +143,7 @@
       @keydown="handleKeydown"
       @mouseup="saveSelection"
       @keyup="saveSelection"
+      @paste="handlePaste"
       @blur="handleBlur"
       @focus="handleFocus"
     ></div>
@@ -343,6 +421,24 @@ function saveSelection() {
   savedRange.value = range.cloneRange()
 }
 
+function isSelectionInsideEditor(selection = window.getSelection()) {
+  const editor = editorRef.value
+  if (!editor || !selection || selection.rangeCount === 0) return false
+  const range = selection.getRangeAt(0)
+  return editor.contains(range.startContainer) && editor.contains(range.endContainer)
+}
+
+function captureCurrentSelection() {
+  const selection = window.getSelection()
+  if (!isSelectionInsideEditor(selection)) return false
+  savedRange.value = selection.getRangeAt(0).cloneRange()
+  return true
+}
+
+function handleSelectionChange() {
+  captureCurrentSelection()
+}
+
 function placeCaretAtEnd() {
   const editor = editorRef.value
   if (!editor) return
@@ -372,29 +468,215 @@ function restoreSelection() {
   }
 }
 
-function applyCommand(command) {
-  restoreSelection()
-  document.execCommand(command, false, null)
+function applyCommand(command, value = null) {
+  const captured = captureCurrentSelection()
+  if (!captured) {
+    restoreSelection()
+  }
+  document.execCommand(command, false, value)
   saveSelection()
   handleInput()
+  focusEditor()
 }
 
-function applyColor() {
-  restoreSelection()
+function applyFormatBlock(tag) {
+  applyCommand('formatBlock', String(tag || 'p').toLowerCase())
+}
+
+function getCurrentRangeForInline() {
+  const captured = captureCurrentSelection()
+  if (!captured) {
+    restoreSelection()
+  }
   const selection = window.getSelection()
   const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null
-  if (!range || range.collapsed) {
+  if (!range || range.collapsed) return null
+  if (!isSelectionInsideEditor(selection)) return null
+  return range
+}
+
+function getInlineFormatConfig(format) {
+  const key = String(format || '').toLowerCase()
+  if (key === 'strong') {
+    return { tagName: 'strong', aliases: ['STRONG', 'B'] }
+  }
+  if (key === 'em') {
+    return { tagName: 'em', aliases: ['EM', 'I'] }
+  }
+  if (key === 'u') {
+    return { tagName: 'u', aliases: ['U'] }
+  }
+  return null
+}
+
+function findClosestInlineAncestor(node, format) {
+  const editor = editorRef.value
+  const cfg = getInlineFormatConfig(format)
+  if (!editor || !cfg || !node) return null
+
+  let current = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement
+  while (current && current !== editor) {
+    if (current.nodeType === Node.ELEMENT_NODE && cfg.aliases.includes(current.tagName)) {
+      return current
+    }
+    current = current.parentElement
+  }
+  return null
+}
+
+function isRangeFullyInsideSingleInline(range, format) {
+  if (!range || range.collapsed) return null
+  const startInline = findClosestInlineAncestor(range.startContainer, format)
+  if (!startInline) return null
+  const endInline = findClosestInlineAncestor(range.endContainer, format)
+  if (!endInline || endInline !== startInline) return null
+
+  const editor = editorRef.value
+  if (!editor || !editor.contains(startInline)) return null
+
+  const normalizeText = (text) => String(text || '').replace(/\s+/g, ' ').trim()
+  const selectedText = normalizeText(range.toString())
+  if (!selectedText) return null
+  const inlineText = normalizeText(startInline.textContent || '')
+
+  return selectedText === inlineText ? startInline : null
+}
+
+function unwrapInlineElement(element) {
+  const parent = element?.parentNode
+  if (!parent) return null
+
+  let firstMoved = null
+  let lastMoved = null
+  while (element.firstChild) {
+    const child = element.firstChild
+    if (!firstMoved) firstMoved = child
+    lastMoved = child
+    parent.insertBefore(child, element)
+  }
+  parent.removeChild(element)
+
+  return { parent, firstMoved, lastMoved }
+}
+
+function wrapSelectionWithInline(tagName, options = {}) {
+  const range = getCurrentRangeForInline()
+  if (!range) return
+
+  const fragment = range.extractContents()
+  if (!fragment || !fragment.textContent) return
+
+  const wrapper = document.createElement(tagName)
+  if (options.style && typeof options.style === 'object') {
+    Object.entries(options.style).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        wrapper.style[key] = String(value)
+      }
+    })
+  }
+
+  wrapper.appendChild(fragment)
+  range.insertNode(wrapper)
+
+  const selection = window.getSelection()
+  if (selection) {
+    const newRange = document.createRange()
+    newRange.selectNodeContents(wrapper)
+    selection.removeAllRanges()
+    selection.addRange(newRange)
+  }
+
+  saveSelection()
+  handleInput()
+  focusEditor()
+}
+
+function applyInlineFormat(tagName) {
+  const range = getCurrentRangeForInline()
+  if (!range) return
+
+  const inlineEl = isRangeFullyInsideSingleInline(range, tagName)
+  if (inlineEl) {
+    const moved = unwrapInlineElement(inlineEl)
+    if (moved?.firstMoved && moved?.lastMoved) {
+      const selection = window.getSelection()
+      if (selection) {
+        const nextRange = document.createRange()
+        nextRange.setStartBefore(moved.firstMoved)
+        nextRange.setEndAfter(moved.lastMoved)
+        selection.removeAllRanges()
+        selection.addRange(nextRange)
+      }
+    }
+    saveSelection()
+    handleInput()
+    focusEditor()
     return
   }
 
-  document.execCommand('styleWithCSS', false, true)
-  document.execCommand('foreColor', false, currentColor.value)
-  saveSelection()
-  handleInput()
+  wrapSelectionWithInline(tagName)
+}
+
+function applyColor() {
+  wrapSelectionWithInline('span', { style: { color: currentColor.value } })
 }
 
 function handleColorChange() {
   saveSelection()
+}
+
+function clearFormat() {
+  restoreSelection()
+  document.execCommand('removeFormat', false, null)
+  saveSelection()
+  handleInput()
+}
+
+function handlePaste(event) {
+  event.preventDefault()
+  const text = event.clipboardData?.getData('text/plain') || ''
+  if (!text) return
+
+  const captured = captureCurrentSelection()
+  if (!captured) {
+    restoreSelection()
+  }
+
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) return
+  const range = selection.getRangeAt(0)
+
+  range.deleteContents()
+
+  const lines = text.split(/\r\n|\r|\n/)
+  const fragment = document.createDocumentFragment()
+  let lastInsertedNode = null
+  lines.forEach((line, index) => {
+    const textNode = document.createTextNode(line)
+    fragment.appendChild(textNode)
+    lastInsertedNode = textNode
+    if (index < lines.length - 1) {
+      const br = document.createElement('br')
+      fragment.appendChild(br)
+      lastInsertedNode = br
+    }
+  })
+
+  range.insertNode(fragment)
+
+  const tailRange = document.createRange()
+  if (lastInsertedNode) {
+    tailRange.setStartAfter(lastInsertedNode)
+  } else {
+    tailRange.setStart(range.endContainer, range.endOffset)
+  }
+  tailRange.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(tailRange)
+
+  saveSelection()
+  handleInput()
+  focusEditor()
 }
 
 async function confirmSubmit() {
@@ -444,6 +726,8 @@ async function saveVersion() {
 
 onMounted(async () => {
   if (!roomId) return
+
+  document.addEventListener('selectionchange', handleSelectionChange)
 
   on('writing:updated', (data) => {
     const incomingVersion = Number(data?.version || 0)
@@ -504,6 +788,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('selectionchange', handleSelectionChange)
   sendAwareness(false)
   if (wsSendTimer) {
     clearTimeout(wsSendTimer)
@@ -530,5 +815,43 @@ watch(editorRef, (el) => {
 .writing-editor:empty::before {
   content: '在这里整理观点、记录结论或起草最终答案...';
   color: #9ca3af;
+}
+
+.writing-editor :deep(h1) {
+  margin: 0.6rem 0 0.4rem;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.writing-editor :deep(h2) {
+  margin: 0.55rem 0 0.35rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.writing-editor :deep(p) {
+  margin: 0.35rem 0;
+  line-height: 1.7;
+}
+
+.writing-editor :deep(ul),
+.writing-editor :deep(ol) {
+  margin: 0.35rem 0 0.35rem 1.25rem;
+  padding-left: 0.75rem;
+}
+
+.writing-editor :deep(ul) {
+  list-style: disc;
+}
+
+.writing-editor :deep(ol) {
+  list-style: decimal;
+}
+
+.writing-editor :deep(li) {
+  margin: 0.2rem 0;
+  line-height: 1.6;
 }
 </style>
