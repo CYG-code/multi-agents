@@ -24,11 +24,11 @@ import { useAgentStore } from '../../stores/agent.js'
 const agentStore = useAgentStore()
 
 const ROLE_NAMES = {
-  facilitator: 'Facilitator',
-  devil_advocate: 'Devil Advocate',
-  summarizer: 'Summarizer',
-  resource_finder: 'Resource Finder',
-  encourager: 'Encourager',
+  facilitator: '主持人',
+  devil_advocate: '质疑者',
+  summarizer: '总结者',
+  resource_finder: '资料员',
+  encourager: '鼓励者',
 }
 
 const typingRoles = computed(() => {

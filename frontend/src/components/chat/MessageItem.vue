@@ -77,11 +77,11 @@ const authStore = useAuthStore()
 const chatStore = useChatStore()
 
 const AGENT_COLORS = {
-  facilitator: { bg: 'bg-indigo-100', text: 'text-indigo-700', label: 'Facilitator' },
-  devil_advocate: { bg: 'bg-red-100', text: 'text-red-700', label: 'Devil Advocate' },
-  summarizer: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Summarizer' },
-  resource_finder: { bg: 'bg-green-100', text: 'text-green-700', label: 'Resource Finder' },
-  encourager: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Encourager' },
+  facilitator: { bg: 'bg-indigo-100', text: 'text-indigo-700', label: '主持人' },
+  devil_advocate: { bg: 'bg-red-100', text: 'text-red-700', label: '质疑者' },
+  summarizer: { bg: 'bg-blue-100', text: 'text-blue-700', label: '总结者' },
+  resource_finder: { bg: 'bg-green-100', text: 'text-green-700', label: '资料员' },
+  encourager: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: '鼓励者' },
 }
 
 const isAgent = computed(() => props.message.sender_type === 'agent')
