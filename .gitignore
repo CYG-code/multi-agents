@@ -30,3 +30,6 @@ dist/
 .ai_scratch/
 
 frontend/test-results/
+
+deploy.ps1
+
