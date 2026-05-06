@@ -31,6 +31,7 @@ class _AutoSpeak:
 
 class _Timing:
     rule_trigger_marker_ttl_seconds = 180
+    time_progress_jitter_enabled = False
 
 
 class _Cfg:
@@ -62,7 +63,7 @@ async def test_time_progress_reminder_triggers_once_per_node(monkeypatch):
         enqueued.append((room_id_arg, payload))
 
     async def _fake_elapsed(_room_id):
-        return 36 * 60.0
+        return 46 * 60.0
 
     async def _fake_snapshot(_room_id):
         return {
@@ -92,7 +93,7 @@ async def test_time_progress_reminder_triggers_once_per_node(monkeypatch):
     assert len(enqueued) == 1
     assert enqueued[0][0] == room_id
     assert enqueued[0][1]["trigger_type"] == "time_progress"
-    assert enqueued[0][1]["node_minutes"] == 35
+    assert enqueued[0][1]["node_minutes"] == 45
     assert enqueued[0][1]["progress_status"] == "normal"
     assert await fake_redis.exists(f"recent_rule_trigger:{room_id}:time_progress")
 
@@ -101,7 +102,7 @@ async def test_time_progress_reminder_triggers_once_per_node(monkeypatch):
 async def test_time_progress_reminder_marks_late_phase_slow(monkeypatch):
     room_id = "room-2"
     now = 20000.0
-    started_at = datetime.now(timezone.utc) - timedelta(minutes=76)
+    started_at = datetime.now(timezone.utc) - timedelta(minutes=96)
     fake_redis = _FakeRedis(
         active_rooms=[room_id],
         values={f"room:{room_id}:last_activity_time": str(now - 1200)},
@@ -112,7 +113,7 @@ async def test_time_progress_reminder_marks_late_phase_slow(monkeypatch):
         enqueued.append((room_id_arg, payload))
 
     async def _fake_elapsed(_room_id):
-        return 76 * 60.0
+        return 96 * 60.0
 
     async def _fake_snapshot(_room_id):
         return {
@@ -140,7 +141,7 @@ async def test_time_progress_reminder_marks_late_phase_slow(monkeypatch):
 
     assert len(enqueued) == 1
     payload = enqueued[0][1]
-    assert payload["node_minutes"] == 75
+    assert payload["node_minutes"] == 95
     assert payload["current_phase"] == "late"
     assert payload["progress_status"] == "slow"
 

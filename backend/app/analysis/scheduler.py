@@ -31,7 +31,7 @@ from app.models.task import Task
 from app.services import writing_submit_service
 
 scheduler = AsyncIOScheduler()
-TIME_NODE_MINUTES = (15, 35, 55, 75, 88)
+TIME_NODE_MINUTES = (20, 45, 70, 95, 115)
 TIME_NODE_LOCK_TTL_SECONDS = 4 * 3600
 SILENCE_EPISODE_MARKER_TTL_SECONDS = 4 * 3600
 TIME_PROGRESS_SCHEDULE_TTL_SECONDS = 30 * 60
@@ -65,9 +65,9 @@ def _is_meaningful_text(text: str) -> bool:
 
 
 def _phase_label(elapsed_minutes: int) -> str:
-    if elapsed_minutes < 30:
+    if elapsed_minutes < 40:
         return "early"
-    if elapsed_minutes < 70:
+    if elapsed_minutes < 90:
         return "middle"
     return "late"
 

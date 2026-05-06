@@ -374,7 +374,7 @@ async def test_time_progress_jitter_schedules_without_immediate_enqueue(monkeypa
         enqueued.append((room_id_arg, payload))
 
     async def _fake_elapsed(_room_id):
-        return 15 * 60
+        return 20 * 60
 
     async def _fake_snapshot(_room_id):
         return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
@@ -393,7 +393,7 @@ async def test_time_progress_jitter_schedules_without_immediate_enqueue(monkeypa
     await scheduler.check_time_progress_reminders()
 
     assert enqueued == []
-    assert await fake_redis.exists(f"time_progress_scheduled:{room_id}:15")
+    assert await fake_redis.exists(f"time_progress_scheduled:{room_id}:20")
 
 
 @pytest.mark.asyncio
@@ -404,17 +404,17 @@ async def test_time_progress_jitter_waits_until_due_then_enqueue(monkeypatch):
         active_rooms=[room_id],
         values={
             f"room:{room_id}:last_activity_time": str(base_now - 10),
-            f"time_progress_scheduled:{room_id}:15": '{"scheduled_at":1900.0,"due_at":2050.0,"node_minutes":15,"jitter_seconds":50}',
+            f"time_progress_scheduled:{room_id}:20": '{"scheduled_at":1900.0,"due_at":2050.0,"node_minutes":20,"jitter_seconds":50}',
         },
     )
-    fake_redis._locks.add(f"time_progress_scheduled:{room_id}:15")
+    fake_redis._locks.add(f"time_progress_scheduled:{room_id}:20")
     enqueued = []
 
     async def _fake_enqueue(room_id_arg, payload):
         enqueued.append((room_id_arg, payload))
 
     async def _fake_elapsed(_room_id):
-        return 15 * 60
+        return 20 * 60
 
     async def _fake_snapshot(_room_id):
         return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
@@ -444,13 +444,13 @@ async def test_time_progress_jitter_waits_until_due_then_enqueue(monkeypatch):
 async def test_time_progress_jitter_is_stable_for_same_room_and_node():
     v1 = scheduler._stable_time_progress_jitter_seconds(
         room_id="stable-room",
-        node_minutes=15,
+        node_minutes=20,
         min_seconds=30,
         max_seconds=90,
     )
     v2 = scheduler._stable_time_progress_jitter_seconds(
         room_id="stable-room",
-        node_minutes=15,
+        node_minutes=20,
         min_seconds=30,
         max_seconds=90,
     )
@@ -462,22 +462,22 @@ async def test_time_progress_jitter_is_stable_for_same_room_and_node():
 async def test_time_progress_jitter_existing_schedule_does_not_reschedule(monkeypatch):
     now = 3000.0
     room_id = "tp-room-3"
-    original_payload = '{"scheduled_at":2900.0,"due_at":4000.0,"node_minutes":15,"jitter_seconds":60}'
+    original_payload = '{"scheduled_at":2900.0,"due_at":4000.0,"node_minutes":20,"jitter_seconds":60}'
     fake_redis = _FakeRedis(
         active_rooms=[room_id],
         values={
             f"room:{room_id}:last_activity_time": str(now - 10),
-            f"time_progress_scheduled:{room_id}:15": original_payload,
+            f"time_progress_scheduled:{room_id}:20": original_payload,
         },
     )
-    fake_redis._locks.add(f"time_progress_scheduled:{room_id}:15")
+    fake_redis._locks.add(f"time_progress_scheduled:{room_id}:20")
     enqueued = []
 
     async def _fake_enqueue(room_id_arg, payload):
         enqueued.append((room_id_arg, payload))
 
     async def _fake_elapsed(_room_id):
-        return 15 * 60
+        return 20 * 60
 
     async def _fake_snapshot(_room_id):
         return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
@@ -495,7 +495,7 @@ async def test_time_progress_jitter_existing_schedule_does_not_reschedule(monkey
 
     await scheduler.check_time_progress_reminders()
     assert enqueued == []
-    assert fake_redis._values[f"time_progress_scheduled:{room_id}:15"] == original_payload
+    assert fake_redis._values[f"time_progress_scheduled:{room_id}:20"] == original_payload
 
 
 @pytest.mark.asyncio
@@ -506,14 +506,14 @@ async def test_time_progress_lock_marker_prevents_duplicate_enqueue(monkeypatch)
         active_rooms=[room_id],
         values={f"room:{room_id}:last_activity_time": str(now - 10)},
     )
-    fake_redis._locks.add(f"trigger_lock:{room_id}:time_progress:100:15")
+    fake_redis._locks.add(f"trigger_lock:{room_id}:time_progress:100:20")
     enqueued = []
 
     async def _fake_enqueue(room_id_arg, payload):
         enqueued.append((room_id_arg, payload))
 
     async def _fake_elapsed(_room_id):
-        return 15 * 60
+        return 20 * 60
 
     async def _fake_snapshot(_room_id):
         return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}
@@ -551,7 +551,7 @@ async def test_time_progress_jitter_disabled_keeps_old_immediate_behavior(monkey
         enqueued.append((room_id_arg, payload))
 
     async def _fake_elapsed(_room_id):
-        return 15 * 60
+        return 20 * 60
 
     async def _fake_snapshot(_room_id):
         return {"timer_started_at": datetime.fromtimestamp(100, tz=timezone.utc), "script_state": {}}

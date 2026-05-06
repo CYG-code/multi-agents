@@ -61,7 +61,7 @@ async def test_start_room_timer_sets_timer_fields(fake_db):
         ]
     )
 
-    updated = await room_service.start_room_timer(fake_db, room, duration_minutes=90)
+    updated = await room_service.start_room_timer(fake_db, room)
 
     assert updated.timer_started_at is not None
     assert updated.timer_deadline_at is not None
@@ -69,7 +69,7 @@ async def test_start_room_timer_sets_timer_fields(fake_db):
     assert isinstance(updated.locked_member_ids, list)
     assert len(updated.locked_member_ids) == 2
     delta = updated.timer_deadline_at - updated.timer_started_at
-    assert int(delta.total_seconds()) == 90 * 60
+    assert int(delta.total_seconds()) == 120 * 60
     assert updated.timer_started_at.tzinfo == timezone.utc
     assert fake_db.commits == 1
     assert fake_db.refreshes == 1

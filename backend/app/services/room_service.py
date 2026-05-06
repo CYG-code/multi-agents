@@ -11,6 +11,8 @@ from app.models.room_member import RoomMember
 from app.models.user import User, UserRole
 from app.schemas.room import RoomCreate
 
+DEFAULT_ROOM_TIMER_DURATION_MINUTES = 120
+
 
 async def create_room(db: AsyncSession, data: RoomCreate, user_id: UUID) -> Room:
     room = Room(name=data.name, task_id=data.task_id, created_by=user_id)
@@ -92,7 +94,11 @@ async def bind_room_task(db: AsyncSession, room: Room, task_id: UUID) -> Room:
     return room
 
 
-async def start_room_timer(db: AsyncSession, room: Room, duration_minutes: int = 90) -> Room:
+async def start_room_timer(
+    db: AsyncSession,
+    room: Room,
+    duration_minutes: int = DEFAULT_ROOM_TIMER_DURATION_MINUTES,
+) -> Room:
     now = datetime.now(timezone.utc)
     locked_member_ids = await get_member_ids(db, room.id)
     room.timer_started_at = now
