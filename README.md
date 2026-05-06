@@ -120,3 +120,47 @@ Auto-fix UTF-8 BOM for tracked text files:
 cd d:\Projects\multi-agents
 .\scripts\check-utf8.ps1 -FixBom
 ```
+
+## 服务器部署脚本（deploy.ps1）
+
+项目根目录提供了 `deploy.ps1`，用于打包代码并上传到服务器后触发远端部署脚本。
+
+脚本位置：
+
+```powershell
+d:\Projects\multi-agents\deploy.ps1
+```
+
+执行方式：
+
+```powershell
+cd d:\Projects\multi-agents
+.\deploy.ps1
+```
+
+脚本会自动执行以下步骤：
+
+1. 在本地打包项目（排除 `.git`、`backend/.venv`、`backend/.env`、`frontend/node_modules`、`frontend/dist`）。
+2. 上传压缩包到服务器：`/opt/multi-agents-src.tar.gz`。
+3. 通过 SSH 执行远端部署脚本：`/opt/deploy-multi-agents.sh`。
+
+## 服务器重启手段（运维）
+
+服务器侧提供两种重启脚本，可用于快速恢复服务：
+
+1. 常规一键重启（推荐日常使用）
+
+```bash
+bash /opt/restart-multi-agents.sh
+```
+
+- 作用：重启后端服务、校验并重载 Nginx、做本地与公网健康检查。
+
+2. 强力重启（Redis 状态异常时使用）
+
+```bash
+bash /opt/restart-multi-agents-hard.sh
+```
+
+- 作用：先重启 Redis，再重启后端并重载 Nginx，随后做状态与健康检查。
+- 注意：会清掉在线状态、房间临时状态和部分缓存；不会删除数据库中的用户、房间、消息等持久数据。
