@@ -78,6 +78,12 @@ class AutoSpeakConfig(BaseModel):
     committee_encourager_enabled: bool = True
 
 
+class BailianSearchAppConfig(BaseModel):
+    enabled: bool = False
+    app_id_env: str = "BAILIAN_SEARCH_APP_ID"
+    timeout_seconds: int = 120
+
+
 class ModelConfigItem(BaseModel):
     model_version: str = settings.AGENT_MODEL
     history_token_budget: int = 4000
@@ -98,6 +104,7 @@ class AgentSettings(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     mention: MentionConfig = Field(default_factory=MentionConfig)
     auto_speak: AutoSpeakConfig = Field(default_factory=AutoSpeakConfig)
+    bailian_search_app: BailianSearchAppConfig = Field(default_factory=BailianSearchAppConfig)
 
 
 def get_agent_settings(force_reload: bool = False) -> AgentSettings:

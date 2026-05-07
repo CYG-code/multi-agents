@@ -76,3 +76,8 @@ auto_speak:
   committee_devil_advocate_enabled: true
   committee_summarizer_enabled: true
   committee_encourager_enabled: true
+
+bailian_search_app:
+  enabled: false
+  app_id_env: BAILIAN_SEARCH_APP_ID
+  timeout_seconds: 120
