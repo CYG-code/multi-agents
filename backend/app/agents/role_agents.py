@@ -15,6 +15,7 @@ from sqlalchemy import update
 from app.agents.llm_client import stream_completion
 from app.agents.queue import set_task_status
 from app.agents.settings import get_agent_settings
+from app.agents.tools.bailian_search_app_client import BailianSearchAppError, query_bailian_search_app
 from app.config import settings
 from app.db.redis_client import get_redis_client
 from app.db.session import AsyncSessionLocal
@@ -141,6 +142,15 @@ class BaseRoleAgent(ABC):
         )
         return formatted
 
+    async def _get_direct_response(
+        self,
+        context: dict,
+        history: list[dict],
+        trigger_type: str | None,
+        task: dict | None,
+    ) -> str | None:
+        return None
+
     @staticmethod
     def _build_content_preview(content: str | None, limit: int = 120) -> str:
         text = (content or "").strip()
@@ -236,26 +246,9 @@ class BaseRoleAgent(ABC):
         error_detail = None
 
         try:
-            system_prompt = self.build_system_prompt(context, task)
-            messages = self.build_messages(history)
-            llm_started = time.perf_counter()
-            _agent_log(
-                "llm_call_start",
-                {
-                    "task_id": task_id,
-                    "room_id": room_id,
-                    "agent_role": self.ROLE,
-                    "model": self.model,
-                    "base_url": settings.OPENAI_BASE_URL,
-                },
-            )
-            async for token in stream_completion(
-                system_prompt=system_prompt,
-                messages=messages,
-                model=self.model,
-                max_tokens=self.MAX_TOKENS,
-            ):
-                full_content += token
+            direct_response = await self._get_direct_response(context, history, trigger_type, task)
+            if direct_response is not None:
+                full_content = direct_response
                 await self._broadcast(
                     room_id,
                     {
@@ -263,23 +256,58 @@ class BaseRoleAgent(ABC):
                         "task_id": str(task_id or ""),
                         "agent_role": self.ROLE,
                         "message_id": message_id,
-                        "token": token,
+                        "token": full_content,
                         "source_message_id": persisted_source_message_id,
                         "source_display_name_snapshot": source_display_name_snapshot,
                         "source_content_preview_snapshot": source_content_preview_snapshot,
                         "trigger_type": trigger_type,
                     },
                 )
-            _agent_log(
-                "llm_call_done",
-                {
-                    "task_id": task_id,
-                    "room_id": room_id,
-                    "agent_role": self.ROLE,
-                    "llm_latency_ms": round((time.perf_counter() - llm_started) * 1000, 3),
-                    "content_len": len(full_content),
-                },
-            )
+            else:
+                system_prompt = self.build_system_prompt(context, task)
+                messages = self.build_messages(history)
+                llm_started = time.perf_counter()
+                _agent_log(
+                    "llm_call_start",
+                    {
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "agent_role": self.ROLE,
+                        "model": self.model,
+                        "base_url": settings.OPENAI_BASE_URL,
+                    },
+                )
+                async for token in stream_completion(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    model=self.model,
+                    max_tokens=self.MAX_TOKENS,
+                ):
+                    full_content += token
+                    await self._broadcast(
+                        room_id,
+                        {
+                            "type": "agent:stream",
+                            "task_id": str(task_id or ""),
+                            "agent_role": self.ROLE,
+                            "message_id": message_id,
+                            "token": token,
+                            "source_message_id": persisted_source_message_id,
+                            "source_display_name_snapshot": source_display_name_snapshot,
+                            "source_content_preview_snapshot": source_content_preview_snapshot,
+                            "trigger_type": trigger_type,
+                        },
+                    )
+                _agent_log(
+                    "llm_call_done",
+                    {
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "agent_role": self.ROLE,
+                        "llm_latency_ms": round((time.perf_counter() - llm_started) * 1000, 3),
+                        "content_len": len(full_content),
+                    },
+                )
         except Exception as exc:
             print(f"[{self.__class__.__name__}] generation failed: {exc}")
             traceback.print_exc()
@@ -449,6 +477,167 @@ class ResourceFinderAgent(BaseRoleAgent):
     ROLE_DISPLAY_NAME = "资源检索者"
     PROMPT_FILE = "resource_finder.txt"
     SKILL_DIR = "resource_finder"
+
+    _FINAL_ANSWER_KEYWORDS = (
+        "最终答案",
+        "标准答案",
+        "直接给答案",
+        "直接写",
+        "帮我写完",
+        "完整报告",
+        "生成报告",
+        "2000字报告",
+        "可提交版本",
+        "帮我们完成第2问",
+        "帮我们完成第3问",
+        "结论应该是什么",
+    )
+    _DANGEROUS_OUTPUT_PHRASES = (
+        "最终答案是",
+        "完整报告如下",
+        "你们可以直接这样写",
+        "可直接提交",
+        "标准答案如下",
+    )
+    _TOPIC_KEYWORDS = (
+        "热岛",
+        "地表温度",
+        "人流密度",
+        "绿化率",
+        "生态",
+        "公共管理",
+        "生态规划",
+        "技术监测",
+    )
+
+    def _is_final_answer_request(self, text: str) -> bool:
+        normalized = (text or "").strip()
+        return any(keyword in normalized for keyword in self._FINAL_ANSWER_KEYWORDS)
+
+    def _sanitize_resource_finder_output(self, text: str) -> str:
+        normalized = (text or "").strip()
+        if not normalized:
+            return self._build_fallback_scaffold()
+        if any(phrase in normalized for phrase in self._DANGEROUS_OUTPUT_PHRASES):
+            return self._build_guardrail_prefix() + "\n\n" + self._build_fallback_scaffold()
+        return normalized
+
+    def _build_guardrail_prefix(self) -> str:
+        return "我不能直接替你们生成最终报告或标准答案，但可以帮你们整理可参考资料和讨论角度。"
+
+    def _apply_guardrail_prefix_if_needed(self, text: str, need_guardrail: bool) -> str:
+        if not need_guardrail:
+            return text
+        prefix = self._build_guardrail_prefix()
+        normalized = (text or "").strip()
+        if not normalized:
+            return prefix
+        if prefix in normalized:
+            return normalized
+        return f"{prefix}\n\n{normalized}"
+
+    def _build_fallback_scaffold(self) -> str:
+        return (
+            "当前无法获取可靠的外部资料，我可以先帮你们整理检索关键词和资料查找方向。\n\n"
+            "推荐关键词：\n"
+            "- 城市热岛效应 成因\n"
+            "- 地表温度 人口密度 绿化率\n"
+            "- 城市生态系统理论 城市热岛\n"
+            "- 城市热岛 公共管理 干预\n"
+            "- 城市热岛 生态规划 绿地降温\n"
+            "- 城市热岛 遥感监测 技术监测\n\n"
+            "推荐资料类型：\n"
+            "- 政府或住建部门发布的城市更新、绿地系统、热岛治理资料\n"
+            "- 城市生态学或城市气候研究论文\n"
+            "- 遥感监测、地表温度、绿化率相关研究\n"
+            "- 城市治理或公共管理案例\n\n"
+            "判断资料可靠性的标准：\n"
+            "- 是否有明确机构、作者或来源\n"
+            "- 是否与地表温度、人流密度、绿化率直接相关\n"
+            "- 是否能支持公共管理、生态规划或技术监测措施\n"
+            "- 是否能帮助小组解释原因或提出干预措施"
+        )
+
+    def _extract_student_request(self, history: list[dict], task: dict | None) -> str:
+        if task:
+            explicit = str(task.get("student_request") or "").strip()
+            if explicit:
+                return explicit
+        for msg in reversed(history or []):
+            content = str(msg.get("content") or "").strip()
+            if content:
+                return content
+        if task:
+            reason = str(task.get("reason") or "").strip()
+            if reason:
+                return reason
+        return "请提供与当前任务最相关的资料线索。"
+
+    def _build_scaffold_query(self, student_request: str) -> str:
+        return (
+            "请基于专业知识库查找与当前协作任务相关的资料。当前任务主题是“城市热岛效应的综合干预策略”。"
+            "请只返回与城市热岛效应、地表温度、人流密度、绿化率、城市生态系统理论、城市公共管理、生态规划、技术监测相关的资料。"
+            "请提供资料名称、来源、主要内容、对学生讨论的帮助。不要生成最终报告，不要给出可直接提交的完整答案。\n\n"
+            f"学生请求：\n{student_request}"
+        )
+
+    def _is_topic_related(self, text: str) -> bool:
+        if not text:
+            return False
+        hit_count = sum(1 for keyword in self._TOPIC_KEYWORDS if keyword in text)
+        return hit_count >= 2
+
+    def _format_scaffold_answer(self, answer: str) -> str:
+        body = (answer or "").strip()
+        if not body:
+            return self._build_fallback_scaffold()
+        if "资料名称" in body and "来源" in body and "主要内容" in body:
+            return body
+        return (
+            "我找到了一些可参考资料：\n\n"
+            f"{body}\n\n"
+            "你们接下来可以讨论：\n"
+            "- 哪些资料能解释地表温度、人流密度、绿化率与热岛效应之间的关系？\n"
+            "- 哪些资料能支持公共管理、生态规划或技术监测措施？\n"
+            "- 你们还缺少哪一类证据？"
+        )
+
+    async def _get_direct_response(
+        self,
+        context: dict,
+        history: list[dict],
+        trigger_type: str | None,
+        task: dict | None,
+    ) -> str | None:
+        cfg = get_agent_settings().bailian_search_app
+        if not cfg.enabled:
+            return None
+
+        student_request = self._extract_student_request(history, task)
+        need_guardrail = self._is_final_answer_request(student_request)
+        app_id_env = (cfg.app_id_env or "BAILIAN_SEARCH_APP_ID").strip()
+        has_app_id = bool((os.getenv(app_id_env) or "").strip())
+        has_api_key = bool((os.getenv("DASHSCOPE_API_KEY") or "").strip())
+        if not (has_app_id and has_api_key):
+            return self._apply_guardrail_prefix_if_needed(self._build_fallback_scaffold(), need_guardrail)
+
+        query = self._build_scaffold_query(student_request)
+
+        try:
+            result = query_bailian_search_app(query)
+        except BailianSearchAppError:
+            return self._apply_guardrail_prefix_if_needed(self._build_fallback_scaffold(), need_guardrail)
+        except Exception:
+            return self._apply_guardrail_prefix_if_needed(self._build_fallback_scaffold(), need_guardrail)
+
+        answer = self._sanitize_resource_finder_output(result.answer)
+        if not answer.strip():
+            return self._apply_guardrail_prefix_if_needed(self._build_fallback_scaffold(), need_guardrail)
+        if not self._is_topic_related(answer):
+            return self._apply_guardrail_prefix_if_needed(self._build_fallback_scaffold(), need_guardrail)
+
+        formatted = self._format_scaffold_answer(answer)
+        return self._apply_guardrail_prefix_if_needed(formatted, need_guardrail)
 
 
 class EncouragerAgent(BaseRoleAgent):
