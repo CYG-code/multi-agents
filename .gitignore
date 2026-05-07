@@ -33,3 +33,13 @@ frontend/test-results/
 
 deploy.ps1
 
+# Backup / sensitive artifacts
+datas/
+*.tar.gz
+*.tar.gz.sha256
+*.dump
+*.rdb
+*.sql
+*.jsonl
+*.log
+
