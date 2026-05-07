@@ -3,6 +3,7 @@ import uuid
 import pytest
 
 from app.models.room import Room
+from app.models.room_task_script import RoomTaskScript
 from app.models.task import Task
 from app.models.user import User, UserRole
 from app.services import task_script_service
@@ -65,7 +66,28 @@ async def test_acquire_task_script_lock_touches_room_activity(fake_db, monkeypat
     async def _noop_broadcast(*_args, **_kwargs):
         return None
 
+    room_script = RoomTaskScript(
+        id=uuid.uuid4(),
+        room_id=room.id,
+        task_id=room.task_id,
+        scripts={
+            "current_status": "S",
+            "next_goal": "G",
+            "history": [],
+            "pending_proposal": {
+                "id": "p-1",
+                "agent_role": "facilitator",
+                "current_status": "S2",
+                "next_goal": "G2",
+            },
+        },
+    )
+
+    async def _fake_get_or_create(_db, _room):
+        return room_script
+
     monkeypatch.setattr(task_script_service.task_service, "get_task", _fake_get_task)
+    monkeypatch.setattr(task_script_service, "get_or_create_room_task_script", _fake_get_or_create)
     monkeypatch.setattr(task_script_service, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(task_script_service, "_touch_room_activity", _fake_touch)
     monkeypatch.setattr(task_script_service, "_broadcast_task_script_updated", _noop_broadcast)

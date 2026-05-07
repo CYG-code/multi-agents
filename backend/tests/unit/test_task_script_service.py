@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.models.room import Room
+from app.models.room_task_script import RoomTaskScript
 from app.models.task import Task
 from app.models.user import User, UserRole
 from app.services import task_script_service
@@ -32,8 +33,19 @@ async def test_propose_facilitator_update_sets_pending_proposal(fake_db, monkeyp
             'change_reason': 'move to solution stage',
         }
 
+    room_script = RoomTaskScript(
+        id=uuid.uuid4(),
+        room_id=room.id,
+        task_id=task.id,
+        scripts={'current_status': 'old status', 'next_goal': '', 'history': [], 'pending_proposal': None},
+    )
+
+    async def _fake_get_or_create(_db, _room):
+        return room_script
+
     monkeypatch.setattr(task_script_service.task_service, 'get_task', _fake_get_task)
     monkeypatch.setattr(task_script_service, '_generate_facilitator_proposal', _fake_generate)
+    monkeypatch.setattr(task_script_service, 'get_or_create_room_task_script', _fake_get_or_create)
 
     result = await task_script_service.propose_facilitator_update(fake_db, room, user)
 
@@ -49,29 +61,31 @@ async def test_propose_facilitator_update_sets_pending_proposal(fake_db, monkeyp
 async def test_confirm_pending_proposal_applies_with_editor_lock(fake_db, monkeypatch):
     room = Room(id=uuid.uuid4(), name='R1', created_by=uuid.uuid4())
     room.task_id = uuid.uuid4()
-    task = Task(
-        id=room.task_id,
-        title='T1',
-        created_by=uuid.uuid4(),
-        scripts={
-            'current_status': 'status A',
-            'next_goal': 'goal A',
-            'history': [],
-            'pending_proposal': {
-                'id': 'p-1',
-                'agent_role': 'facilitator',
-                'current_status': 'status B',
-                'next_goal': 'goal B',
-                'change_reason': 'need push',
-            },
-        },
-    )
+    task = Task(id=room.task_id, title='T1', created_by=uuid.uuid4())
+    pending_proposal = {
+        'id': 'p-1',
+        'agent_role': 'facilitator',
+        'current_status': 'status B',
+        'next_goal': 'goal B',
+        'change_reason': 'need push',
+    }
     user = User(
         id=uuid.uuid4(),
         username='s1',
         password_hash='x',
         display_name='Student 1',
         role=UserRole.student,
+    )
+    room_script = RoomTaskScript(
+        id=uuid.uuid4(),
+        room_id=room.id,
+        task_id=task.id,
+        scripts={
+            'current_status': 'status A',
+            'next_goal': 'goal A',
+            'history': [],
+            'pending_proposal': dict(pending_proposal),
+        },
     )
 
     async def _fake_get_task(_db, _task_id):
@@ -83,9 +97,13 @@ async def test_confirm_pending_proposal_applies_with_editor_lock(fake_db, monkey
     async def _fake_release_lock(_room_id, _current_user, _lease_id):
         return {'released': True}
 
+    async def _fake_get_or_create(_db, _room):
+        return room_script
+
     monkeypatch.setattr(task_script_service.task_service, 'get_task', _fake_get_task)
     monkeypatch.setattr(task_script_service, '_get_lock_raw', _fake_get_lock_raw)
     monkeypatch.setattr(task_script_service, 'release_task_script_lock', _fake_release_lock)
+    monkeypatch.setattr(task_script_service, 'get_or_create_room_task_script', _fake_get_or_create)
 
     result = await task_script_service.confirm_pending_proposal(
         fake_db,
@@ -116,12 +134,7 @@ async def test_confirm_pending_proposal_applies_with_editor_lock(fake_db, monkey
 async def test_confirm_pending_proposal_raises_when_missing_pending(fake_db, monkeypatch):
     room = Room(id=uuid.uuid4(), name='R1', created_by=uuid.uuid4())
     room.task_id = uuid.uuid4()
-    task = Task(
-        id=room.task_id,
-        title='T1',
-        created_by=uuid.uuid4(),
-        scripts={'current_status': 'A', 'next_goal': 'B', 'history': [], 'pending_proposal': None},
-    )
+    task = Task(id=room.task_id, title='T1', created_by=uuid.uuid4())
     user = User(
         id=uuid.uuid4(),
         username='s1',
@@ -129,11 +142,21 @@ async def test_confirm_pending_proposal_raises_when_missing_pending(fake_db, mon
         display_name='Student 1',
         role=UserRole.student,
     )
+    room_script = RoomTaskScript(
+        id=uuid.uuid4(),
+        room_id=room.id,
+        task_id=task.id,
+        scripts={'current_status': 'A', 'next_goal': 'B', 'history': [], 'pending_proposal': None},
+    )
 
     async def _fake_get_task(_db, _task_id):
         return task
 
+    async def _fake_get_or_create(_db, _room):
+        return room_script
+
     monkeypatch.setattr(task_script_service.task_service, 'get_task', _fake_get_task)
+    monkeypatch.setattr(task_script_service, 'get_or_create_room_task_script', _fake_get_or_create)
 
     with pytest.raises(HTTPException) as exc:
         await task_script_service.confirm_pending_proposal(fake_db, room, user)

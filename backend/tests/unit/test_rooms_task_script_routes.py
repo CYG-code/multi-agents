@@ -58,14 +58,10 @@ def test_get_task_script_endpoint_returns_state(fake_db, monkeypatch):
     async def _fake_get_room(_db, _room_id):
         return room
 
-    async def _fake_get_task(_db, _task_id):
-        return object()
-
-    def _fake_state(_task):
+    async def _fake_state(_db, _room):
         return {"task_id": str(task_id), "current_status": "S", "next_goal": "G", "history": [], "pending_proposal": None}
 
     monkeypatch.setattr(rooms.room_service, "get_room", _fake_get_room)
-    monkeypatch.setattr(rooms.task_service, "get_task", _fake_get_task)
     monkeypatch.setattr(rooms.task_script_service, "get_task_script_state", _fake_state)
 
     resp = client.get(f"/api/rooms/{room_id}/task-script")

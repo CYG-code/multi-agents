@@ -530,8 +530,7 @@ async def get_task_script_state(
         raise RoomNotFoundError()
     await _ensure_room_member(db, room_id, current_user.id)
 
-    task = await task_service.get_task(db, room.task_id) if room.task_id else None
-    return task_script_service.get_task_script_state(task)
+    return await task_script_service.get_task_script_state(db, room)
 
 
 @router.get("/{room_id}/task-script/lock", status_code=200)

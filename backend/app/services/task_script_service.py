@@ -13,6 +13,7 @@ from app.db.redis_client import get_redis_client
 from app.models.room import Room
 from app.models.user import User
 from app.services import room_service, task_service
+from app.services.room_task_script_service import get_or_create_room_task_script, normalize_room_task_scripts
 
 LOCK_TTL_SECONDS = 120
 REQUIRED_STUDENT_CONFIRMATIONS = 1
@@ -161,10 +162,19 @@ def _extract_json_object(raw_text: str) -> dict:
     raise ValueError("cannot parse json object from model output")
 
 
-def get_task_script_state(task) -> dict:
-    state = _normalize_scripts(task.scripts if task else None)
+async def get_task_script_state(db, room: Room) -> dict:
+    if not room:
+        return {
+            "task_id": None,
+            "current_status": "",
+            "next_goal": "",
+            "pending_proposal": None,
+            "history": [],
+        }
+    room_script = await get_or_create_room_task_script(db, room)
+    state = normalize_room_task_scripts(room_script.scripts)
     return {
-        "task_id": str(task.id) if task else None,
+        "task_id": str(room.task_id) if room.task_id else None,
         "current_status": state["current_status"],
         "next_goal": state["next_goal"],
         "pending_proposal": state["pending_proposal"],
@@ -230,7 +240,8 @@ async def propose_facilitator_update(db, room: Room, current_user: User) -> dict
     if task is None:
         raise HTTPException(status_code=400, detail="Room has no bound task")
 
-    base = _normalize_scripts(task.scripts)
+    room_script = await get_or_create_room_task_script(db, room)
+    base = normalize_room_task_scripts(room_script.scripts)
     pending = base["pending_proposal"]
     room_id = str(room.id)
     if pending:
@@ -254,17 +265,17 @@ async def propose_facilitator_update(db, room: Room, current_user: User) -> dict
         "required_confirmations": REQUIRED_STUDENT_CONFIRMATIONS,
         "confirmations": [],
     }
-    task.scripts = {
+    room_script.scripts = {
         "current_status": base["current_status"],
         "next_goal": base["next_goal"],
         "history": base["history"],
         "pending_proposal": proposal,
     }
     await db.commit()
-    await db.refresh(task)
+    await db.refresh(room_script)
     await _touch_room_activity(room_id)
     await _broadcast_task_script_updated(room_id, reason="proposal_created")
-    return get_task_script_state(task)
+    return await get_task_script_state(db, room)
 
 
 async def acquire_task_script_lock(db, room: Room, current_user: User) -> dict:
@@ -273,7 +284,8 @@ async def acquire_task_script_lock(db, room: Room, current_user: User) -> dict:
     task = await task_service.get_task(db, room.task_id)
     if task is None:
         raise HTTPException(status_code=400, detail="Room has no bound task")
-    state = _normalize_scripts(task.scripts)
+    room_script = await get_or_create_room_task_script(db, room)
+    state = normalize_room_task_scripts(room_script.scripts)
     pending = state["pending_proposal"]
     if not pending:
         raise HTTPException(status_code=400, detail="No pending proposal to edit")
@@ -374,7 +386,8 @@ async def confirm_pending_proposal(
     if task is None:
         raise HTTPException(status_code=400, detail="Room has no bound task")
 
-    base = _normalize_scripts(task.scripts)
+    room_script = await get_or_create_room_task_script(db, room)
+    base = normalize_room_task_scripts(room_script.scripts)
     pending = base["pending_proposal"]
     if not pending:
         raise HTTPException(status_code=400, detail="No pending proposal to confirm")
@@ -441,14 +454,14 @@ async def confirm_pending_proposal(
         pending["required_confirmations"] = REQUIRED_STUDENT_CONFIRMATIONS
         pending["latest_confirmed_at"] = now_iso
 
-        task.scripts = {
+        room_script.scripts = {
             "current_status": base["current_status"],
             "next_goal": base["next_goal"],
             "history": base["history"],
             "pending_proposal": pending,
         }
         await db.commit()
-        await db.refresh(task)
+        await db.refresh(room_script)
 
         if lock_owned_by_current_user:
             try:
@@ -457,7 +470,7 @@ async def confirm_pending_proposal(
                 pass
         await _touch_room_activity(room_id)
         await _broadcast_task_script_updated(room_id, reason="proposal_confirmation_progress")
-        return get_task_script_state(task)
+        return await get_task_script_state(db, room)
 
     new_history = list(base["history"])
     new_history.append(
@@ -477,7 +490,7 @@ async def confirm_pending_proposal(
         }
     )
 
-    task.scripts = {
+    room_script.scripts = {
         "current_status": final_current_status,
         "next_goal": final_next_goal,
         "history": new_history[-100:],
@@ -485,7 +498,7 @@ async def confirm_pending_proposal(
     }
 
     await db.commit()
-    await db.refresh(task)
+    await db.refresh(room_script)
 
     try:
         if lock_owned_by_current_user:
@@ -495,4 +508,4 @@ async def confirm_pending_proposal(
         pass
     await _touch_room_activity(room_id)
     await _broadcast_task_script_updated(room_id, reason="proposal_confirmed")
-    return get_task_script_state(task)
+    return await get_task_script_state(db, room)
