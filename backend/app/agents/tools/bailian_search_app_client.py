@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.agents.settings import get_agent_settings
+from app.config import settings
 
 _SOURCE_KEYS = {
     "citation",
@@ -76,25 +77,66 @@ def _extract_source_names_from_answer(answer: str) -> list[str]:
             value = line.split("：", 1)[1].strip()
             if value and value not in out:
                 out.append(value)
+        elif line.lower().startswith("来源:"):
+            value = line.split(":", 1)[1].strip()
+            if value and value not in out:
+                out.append(value)
     return out
+
+
+def _truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_bailian_search_app_enabled() -> bool:
+    env_enabled = os.getenv("BAILIAN_SEARCH_APP_ENABLED")
+    if env_enabled is not None and str(env_enabled).strip() != "":
+        return _truthy(env_enabled)
+    cfg = get_agent_settings()
+    return bool(cfg.bailian_search_app.enabled)
+
+
+def _resolve_api_key() -> str:
+    env_key = (os.getenv("DASHSCOPE_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+    settings_key = (getattr(settings, "DASHSCOPE_API_KEY", "") or "").strip()
+    if settings_key:
+        return settings_key
+    raise BailianSearchAppError("Missing DASHSCOPE_API_KEY")
+
+
+def _resolve_app_id(app_id_env: str) -> str:
+    env_app_id = (os.getenv(app_id_env) or "").strip()
+    if env_app_id:
+        return env_app_id
+    settings_app_id = (getattr(settings, "BAILIAN_SEARCH_APP_ID", "") or "").strip()
+    if settings_app_id:
+        return settings_app_id
+    raise BailianSearchAppError(f"Missing {app_id_env}")
+
+
+def _resolve_timeout(default_timeout_seconds: int) -> int:
+    env_timeout = os.getenv("BAILIAN_SEARCH_APP_TIMEOUT_SECONDS")
+    if env_timeout and env_timeout.isdigit():
+        return max(5, int(env_timeout))
+    settings_timeout = getattr(settings, "BAILIAN_SEARCH_APP_TIMEOUT_SECONDS", 0)
+    if isinstance(settings_timeout, int) and settings_timeout > 0:
+        return max(5, settings_timeout)
+    return max(5, int(default_timeout_seconds))
 
 
 def query_bailian_search_app(query: str) -> BailianSearchAppResult:
     cfg = get_agent_settings()
     app_cfg = cfg.bailian_search_app
 
-    api_key = (os.getenv("DASHSCOPE_API_KEY") or "").strip()
-    if not api_key:
-        raise BailianSearchAppError("Missing DASHSCOPE_API_KEY")
+    api_key = _resolve_api_key()
 
     app_id_env = (app_cfg.app_id_env or "BAILIAN_SEARCH_APP_ID").strip()
-    app_id = (os.getenv(app_id_env) or "").strip()
-    if not app_id:
-        raise BailianSearchAppError(f"Missing {app_id_env}")
-
-    timeout_raw = os.getenv("BAILIAN_SEARCH_APP_TIMEOUT_SECONDS")
-    timeout_seconds = int(timeout_raw) if timeout_raw and timeout_raw.isdigit() else int(app_cfg.timeout_seconds)
-    timeout_seconds = max(5, timeout_seconds)
+    app_id = _resolve_app_id(app_id_env)
+    timeout_seconds = _resolve_timeout(int(app_cfg.timeout_seconds))
 
     url = f"https://dashscope.aliyuncs.com/api/v1/apps/{app_id}/completion"
     headers = {

@@ -59,3 +59,8 @@ description: Provide evidence scaffolding from relevant materials without produc
 2. 是否给出来源信息或来源不确定性说明。
 3. 是否与当前任务主题强相关。
 4. 是否给出可继续讨论的问题。
+
+## Final-Answer Guardrail (Mandatory)
+When students ask for a final answer, full report, or directly submittable text, you must first output exactly:
+“我不能直接替你们生成最终报告或标准答案，但可以帮你们整理可参考资料和讨论角度。”
+Then continue with evidence scaffolding (materials, source clues, discussion angles), not a finished answer.

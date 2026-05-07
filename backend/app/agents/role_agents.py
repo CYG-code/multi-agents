@@ -15,7 +15,11 @@ from sqlalchemy import update
 from app.agents.llm_client import stream_completion
 from app.agents.queue import set_task_status
 from app.agents.settings import get_agent_settings
-from app.agents.tools.bailian_search_app_client import BailianSearchAppError, query_bailian_search_app
+from app.agents.tools.bailian_search_app_client import (
+    BailianSearchAppError,
+    is_bailian_search_app_enabled,
+    query_bailian_search_app,
+)
 from app.config import settings
 from app.db.redis_client import get_redis_client
 from app.db.session import AsyncSessionLocal
@@ -477,17 +481,28 @@ class ResourceFinderAgent(BaseRoleAgent):
     ROLE_DISPLAY_NAME = "资源检索者"
     PROMPT_FILE = "resource_finder.txt"
     SKILL_DIR = "resource_finder"
+    FINAL_ANSWER_BOUNDARY_MESSAGE = "我不能直接替你们生成最终报告或标准答案，但可以帮你们整理可参考资料和讨论角度。"
 
     _FINAL_ANSWER_KEYWORDS = (
         "最终答案",
         "标准答案",
         "直接给答案",
         "直接写",
+        "写一份",
+        "生成一份",
+        "帮我们写一份",
+        "一份完整的",
+        "完整的2000字",
+        "2000字",
         "帮我写完",
         "完整报告",
         "生成报告",
+        "写报告",
         "2000字报告",
         "可提交版本",
+        "直接提交",
+        "最好可以直接提交",
+        "可直接提交",
         "帮我们完成第2问",
         "帮我们完成第3问",
         "结论应该是什么",
@@ -512,7 +527,17 @@ class ResourceFinderAgent(BaseRoleAgent):
 
     def _is_final_answer_request(self, text: str) -> bool:
         normalized = (text or "").strip()
-        return any(keyword in normalized for keyword in self._FINAL_ANSWER_KEYWORDS)
+        if any(keyword in normalized for keyword in self._FINAL_ANSWER_KEYWORDS):
+            return True
+        report_markers = ("报告",)
+        action_markers = ("写", "生成", "完整", "2000字", "直接提交", "可提交")
+        if any(m in normalized for m in report_markers) and any(m in normalized for m in action_markers):
+            return True
+        if "2000字" in normalized and any(m in normalized for m in ("写", "生成", "报告", "完整")):
+            return True
+        if "直接提交" in normalized or "可直接提交" in normalized:
+            return True
+        return False
 
     def _sanitize_resource_finder_output(self, text: str) -> str:
         normalized = (text or "").strip()
@@ -523,7 +548,7 @@ class ResourceFinderAgent(BaseRoleAgent):
         return normalized
 
     def _build_guardrail_prefix(self) -> str:
-        return "我不能直接替你们生成最终报告或标准答案，但可以帮你们整理可参考资料和讨论角度。"
+        return self.FINAL_ANSWER_BOUNDARY_MESSAGE
 
     def _apply_guardrail_prefix_if_needed(self, text: str, need_guardrail: bool) -> str:
         if not need_guardrail:
@@ -563,6 +588,16 @@ class ResourceFinderAgent(BaseRoleAgent):
             explicit = str(task.get("student_request") or "").strip()
             if explicit:
                 return explicit
+        for msg in reversed(history or []):
+            sender_type = str(msg.get("sender_type") or "").strip().lower()
+            agent_role = str(msg.get("agent_role") or "").strip()
+            content = str(msg.get("content") or "").strip()
+            if not content:
+                continue
+            if sender_type and sender_type != "agent":
+                return content
+            if not sender_type and not agent_role:
+                return content
         for msg in reversed(history or []):
             content = str(msg.get("content") or "").strip()
             if content:
@@ -609,18 +644,20 @@ class ResourceFinderAgent(BaseRoleAgent):
         trigger_type: str | None,
         task: dict | None,
     ) -> str | None:
-        cfg = get_agent_settings().bailian_search_app
-        if not cfg.enabled:
+        if not is_bailian_search_app_enabled():
             return None
 
         student_request = self._extract_student_request(history, task)
-        need_guardrail = self._is_final_answer_request(student_request)
-        app_id_env = (cfg.app_id_env or "BAILIAN_SEARCH_APP_ID").strip()
-        has_app_id = bool((os.getenv(app_id_env) or "").strip())
-        has_api_key = bool((os.getenv("DASHSCOPE_API_KEY") or "").strip())
-        if not (has_app_id and has_api_key):
-            return self._apply_guardrail_prefix_if_needed(self._build_fallback_scaffold(), need_guardrail)
-
+        guardrail_candidates = [student_request]
+        if task:
+            guardrail_candidates.extend(
+                [
+                    str(task.get("student_request") or ""),
+                    str(task.get("reason") or ""),
+                    str(task.get("source_content_preview_snapshot") or ""),
+                ]
+            )
+        need_guardrail = any(self._is_final_answer_request(text) for text in guardrail_candidates if text.strip())
         query = self._build_scaffold_query(student_request)
 
         try:

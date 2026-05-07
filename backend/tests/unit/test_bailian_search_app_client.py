@@ -155,6 +155,7 @@ def test_query_bailian_search_app_http_non_200_raises(monkeypatch, _env):
 
 def test_query_bailian_search_app_missing_api_key_raises(monkeypatch, _env):
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(client.settings, "DASHSCOPE_API_KEY", "")
     response = _FakeStreamResponse(status_code=200, lines=[])
     _install_fake_httpx(monkeypatch, response)
 
@@ -165,6 +166,7 @@ def test_query_bailian_search_app_missing_api_key_raises(monkeypatch, _env):
 
 def test_query_bailian_search_app_missing_app_id_raises(monkeypatch, _env):
     monkeypatch.delenv("BAILIAN_SEARCH_APP_ID", raising=False)
+    monkeypatch.setattr(client.settings, "BAILIAN_SEARCH_APP_ID", "")
     response = _FakeStreamResponse(status_code=200, lines=[])
     _install_fake_httpx(monkeypatch, response)
 
@@ -187,3 +189,28 @@ def test_query_bailian_search_app_sends_expected_request_body(monkeypatch, _env)
     assert recorder["body"]["parameters"]["incremental_output"] is True
     assert recorder["body"]["parameters"]["has_thoughts"] is True
 
+
+def test_query_bailian_search_app_uses_settings_when_env_missing(monkeypatch, _env):
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("BAILIAN_SEARCH_APP_ID", raising=False)
+    monkeypatch.delenv("BAILIAN_SEARCH_APP_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(client.settings, "DASHSCOPE_API_KEY", "sk-settings-9999")
+    monkeypatch.setattr(client.settings, "BAILIAN_SEARCH_APP_ID", "app-settings-2")
+    monkeypatch.setattr(client.settings, "BAILIAN_SEARCH_APP_TIMEOUT_SECONDS", 77)
+
+    recorder = {}
+    lines = [_mk_chunk("ok")]
+    response = _FakeStreamResponse(status_code=200, lines=lines)
+    _install_fake_httpx(monkeypatch, response, recorder)
+
+    result = client.query_bailian_search_app("query")
+    assert result.answer == "ok"
+    assert "/api/v1/apps/app-settings-2/completion" in recorder["url"]
+
+
+def test_is_bailian_search_app_enabled_env_override(monkeypatch, _env):
+    monkeypatch.setenv("BAILIAN_SEARCH_APP_ENABLED", "1")
+    assert client.is_bailian_search_app_enabled() is True
+
+    monkeypatch.setenv("BAILIAN_SEARCH_APP_ENABLED", "0")
+    assert client.is_bailian_search_app_enabled() is False

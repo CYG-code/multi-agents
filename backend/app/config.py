@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     DEBUG: str = "false"
     JWT_SECRET_KEY: str
     CORS_ORIGINS: str = "http://localhost:5173"
+    DASHSCOPE_API_KEY: str = ""
+    BAILIAN_SEARCH_APP_ID: str = ""
+    BAILIAN_SEARCH_APP_TIMEOUT_SECONDS: int = 120
+    BAILIAN_SEARCH_APP_ENABLED: str = ""
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE_PATH),
