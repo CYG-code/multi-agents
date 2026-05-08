@@ -692,7 +692,16 @@ class ConceptExplainerAgent(BaseRoleAgent):
     MAX_TOKENS = 700
 
 
+class SocraticAgent(BaseRoleAgent):
+    ROLE = "socratic"
+    ROLE_DISPLAY_NAME = "苏格拉底智能体"
+    PROMPT_FILE = "socratic.txt"
+    SKILL_DIR = "socratic"
+    MAX_TOKENS = 420
+
+
 ROLE_AGENTS: dict[str, BaseRoleAgent] = {
+    "socratic": SocraticAgent(),
     "facilitator": FacilitatorAgent(),
     "devil_advocate": DevilAdvocateAgent(),
     "summarizer": SummarizerAgent(),
