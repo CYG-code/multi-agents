@@ -49,6 +49,7 @@
         @save="saveTaskPatch"
       />
       <TaskScript
+        v-if="showMultiAgentTaskFlow"
         class="flex-1 min-h-0"
         :state="roomStore.taskScriptState"
         :loading="roomStore.loadingTaskScript"
@@ -139,6 +140,8 @@ const timerActionButtonClass = computed(() => {
   }
   return 'border-amber-200 text-amber-700 bg-white hover:bg-amber-50'
 })
+const currentAgentMode = computed(() => roomStore.currentRoom?.agent_mode || 'multi')
+const showMultiAgentTaskFlow = computed(() => currentAgentMode.value === 'multi')
 
 function formatDuration(ms) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000))
