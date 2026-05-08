@@ -112,6 +112,17 @@
               </label>
             </div>
           </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium text-gray-700">{{ TXT.agentModeLabel }}</label>
+            <select
+              v-model="agentMode"
+              class="w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="none">{{ TXT.agentModeNone }}</option>
+              <option value="single">{{ TXT.agentModeSingle }}</option>
+              <option value="multi">{{ TXT.agentModeMulti }}</option>
+            </select>
+          </div>
 
           <div v-if="createMode === 'template'">
             <label class="mb-1 block text-sm font-medium text-gray-700">{{ TXT.selectTemplate }}</label>
@@ -346,6 +357,10 @@ const TXT = {
   createMode: '\u521b\u5efa\u65b9\u5f0f',
   useTemplate: '\u4f7f\u7528\u6a21\u677f',
   manualInput: '\u624b\u52a8\u8f93\u5165',
+  agentModeLabel: '\u5b9e\u9a8c\u6761\u4ef6',
+  agentModeNone: '\u65e0\u667a\u80fd\u4f53\u7ec4\uff1a\u4fdd\u7559\u534f\u4f5c\u5e73\u53f0\u57fa\u7840\u529f\u80fd\uff0c\u4e0d\u542f\u7528\u667a\u80fd\u4f53',
+  agentModeSingle: '\u5355\u667a\u80fd\u4f53\u7ec4\uff1a\u4ec5\u542f\u7528\u82cf\u683c\u62c9\u5e95\u667a\u80fd\u4f53',
+  agentModeMulti: '\u591a\u667a\u80fd\u4f53\u7ec4\uff1a\u542f\u7528\u591a\u89d2\u8272\u667a\u80fd\u4f53',
   selectTemplate: '\u9009\u62e9\u6a21\u677f',
   loadingTemplates: '\u6a21\u677f\u52a0\u8f7d\u4e2d...',
   selectTemplatePlaceholder: '\u8bf7\u9009\u62e9\u6a21\u677f',
@@ -391,6 +406,7 @@ const roomStatusFilter = ref('all')
 const showModal = ref(false)
 const newRoomName = ref('')
 const createMode = ref('template')
+const agentMode = ref('multi')
 const templates = ref([])
 const templatesLoading = ref(false)
 const selectedTemplateId = ref('')
@@ -564,6 +580,7 @@ async function openCreateModal() {
   showModal.value = true
   createError.value = ''
   createMode.value = 'template'
+  agentMode.value = 'multi'
   selectedTemplateId.value = ''
   await loadTemplates()
   if (!templates.value.length) {
@@ -612,10 +629,15 @@ async function handleCreateRoom() {
       taskId = createdTask.id
     }
 
-    await api.post('/rooms', { name: newRoomName.value.trim(), task_id: taskId })
+    await api.post('/rooms', {
+      name: newRoomName.value.trim(),
+      task_id: taskId,
+      agent_mode: agentMode.value || 'multi',
+    })
 
     showModal.value = false
     newRoomName.value = ''
+    agentMode.value = 'multi'
     selectedTemplateId.value = ''
     taskTitle.value = ''
     taskRequirements.value = ''
