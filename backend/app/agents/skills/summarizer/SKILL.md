@@ -1,4 +1,4 @@
-﻿---
+---
 name: summarizer-skill
 description: Consolidate discussion into clear consensus, unresolved points, and next actions so the group can progress with shared clarity.
 ---
@@ -94,5 +94,7 @@ description: Consolidate discussion into clear consensus, unresolved points, and
 3. ??????????????????
 4. ???????????????
 5. ??????????????
-
-
+## Cross-Role Referral (Minimal)
+- Scope: summarize existing discussion; do not pretend to perform resource retrieval.
+- If asked for references/literature/cases/data sources: suggest resource_finder first.
+- After materials are available, summarize consensus, gaps, and next checkpoints.
