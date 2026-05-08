@@ -7,6 +7,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from app.agents.agent_mode import can_use_agent_role, get_room_agent_mode
 from app.agents.context_builder import get_recent_messages, get_room_context
 from app.agents.queue import dequeue_tasks, requeue_task, set_task_status
 from app.agents.role_agents import ROLE_AGENTS
@@ -95,6 +96,29 @@ class AgentWorker:
             },
         )
         agent_role = (task.get("agent_role") or "").strip().lower()
+        room_mode = await get_room_agent_mode(room_id)
+        if not can_use_agent_role(room_mode, agent_role):
+            _agent_log(
+                "agent_worker_task_skipped_by_mode",
+                {
+                    "task_id": task_id,
+                    "room_id": room_id,
+                    "agent_role": agent_role,
+                    "agent_mode": room_mode,
+                },
+            )
+            await set_task_status(
+                task_id=task_id,
+                room_id=room_id,
+                agent_role=agent_role,
+                trigger_type=trigger_type,
+                status="skipped",
+                reason="blocked_by_agent_mode",
+                source_message_id=source_message_id,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                drop_reason="blocked_by_agent_mode",
+            )
+            return
         if agent_role not in ROLE_AGENTS:
             print(f"[AgentWorker] unknown agent_role={agent_role}")
             _agent_log("agent_worker_task_failed", {"task_id": task_id, "room_id": room_id, "reason": "unknown_role"})

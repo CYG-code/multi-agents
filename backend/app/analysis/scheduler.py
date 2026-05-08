@@ -9,6 +9,7 @@ from uuid import UUID
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 
+from app.agents.agent_mode import get_room_agent_mode, should_run_auto_dispatcher
 from app.agents.committee import basic_committee
 from app.agents.llm_client import refresh_model_routing
 from app.agents.agent_messages import (
@@ -268,6 +269,10 @@ async def check_silence() -> None:
     )
 
     for room_id in active_rooms:
+        room_mode = await get_room_agent_mode(room_id)
+        if not should_run_auto_dispatcher(room_mode):
+            continue
+
         last_msg_time = await redis_client.get(f"room:{room_id}:last_msg_time")
         last_activity_time = await redis_client.get(f"room:{room_id}:last_activity_time")
         episode_anchor = last_msg_time or last_activity_time
@@ -361,6 +366,10 @@ async def check_committee_timer() -> None:
     active_rooms = await redis_client.smembers("active_rooms")
     warmup_seconds = cfg.timing.warmup_minutes * 60
     for room_id in active_rooms:
+        room_mode = await get_room_agent_mode(room_id)
+        if not should_run_auto_dispatcher(room_mode):
+            continue
+
         elapsed_seconds = await get_elapsed_seconds_from_timer_start(room_id)
         if elapsed_seconds is None or elapsed_seconds < warmup_seconds:
             # Committee timer is also gated by teacher-started timer and warmup period.
@@ -386,6 +395,9 @@ async def check_time_progress_reminders() -> None:
     for raw_room_id in active_rooms:
         room_id = _decode_room_id(raw_room_id)
         if not room_id:
+            continue
+        room_mode = await get_room_agent_mode(room_id)
+        if not should_run_auto_dispatcher(room_mode):
             continue
 
         elapsed_seconds = await get_elapsed_seconds_from_timer_start(room_id)
@@ -582,6 +594,9 @@ async def check_emotional_support() -> None:
     for raw_room_id in active_rooms:
         room_id = _decode_room_id(raw_room_id)
         if not room_id:
+            continue
+        room_mode = await get_room_agent_mode(room_id)
+        if not should_run_auto_dispatcher(room_mode):
             continue
 
         lock_key = f"trigger_lock:{room_id}:emotional_support"

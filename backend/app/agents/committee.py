@@ -5,6 +5,7 @@ import json
 import time
 from uuid import UUID
 
+from app.agents.agent_mode import get_room_agent_mode, should_run_auto_dispatcher
 from app.agents.context_builder import get_recent_messages, get_room_context, get_room_members
 from app.agents.agent_messages import COMMITTEE_DEFAULT_REASON
 from app.agents.queue import enqueue_task
@@ -30,6 +31,10 @@ class BasicCommittee:
         self.dispatcher = ChiefDispatcher()
 
     async def analyze_and_dispatch(self, room_id: str) -> None:
+        room_mode = await get_room_agent_mode(room_id)
+        if not should_run_auto_dispatcher(room_mode):
+            return
+
         messages = await get_recent_messages(room_id, limit=50)
         members = await get_room_members(room_id)
         if not messages:

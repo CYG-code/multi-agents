@@ -1,5 +1,6 @@
 from fastapi import APIRouter, BackgroundTasks
 
+from app.agents.agent_mode import can_use_agent_role, get_room_agent_mode
 from app.agents.context_builder import get_recent_messages, get_room_context
 from app.agents.llm_client import get_model_routing_status
 from app.agents.role_agents import ROLE_AGENTS
@@ -13,6 +14,10 @@ async def trigger_agent(
     role: str = "facilitator",
     background_tasks: BackgroundTasks = None,
 ):
+    room_mode = await get_room_agent_mode(room_id)
+    if not can_use_agent_role(room_mode, role):
+        return {"status": "blocked_by_agent_mode", "room_id": room_id, "role": role, "agent_mode": room_mode}
+
     agent = ROLE_AGENTS.get(role)
     if agent is None:
         return {"status": "unsupported_role", "room_id": room_id, "role": role}

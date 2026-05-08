@@ -9,6 +9,7 @@ from app.models.room import RoomStatus
 class RoomCreate(BaseModel):
     name: str
     task_id: Optional[UUID] = None
+    agent_mode: Literal["none", "single", "multi"] = "multi"
 
 
 class RoomUpdate(BaseModel):
@@ -81,5 +82,6 @@ class RoomResponse(BaseModel):
     timer_deadline_at: Optional[datetime] = None
     timer_stopped_at: Optional[datetime] = None
     locked_member_ids: Optional[list[str]] = None
+    agent_mode: Literal["none", "single", "multi"] = "multi"
 
     model_config = ConfigDict(from_attributes=True)

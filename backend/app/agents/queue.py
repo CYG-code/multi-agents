@@ -6,6 +6,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from app.agents.agent_mode import can_use_agent_role, get_room_agent_mode
 from app.db.redis_client import get_redis_client
 
 QUEUE_KEY_PREFIX = "agent_queue"
@@ -81,11 +82,23 @@ def _validate_task(task: dict) -> None:
         raise ValueError(f"agent task missing required fields: {missing}")
 
 
-async def enqueue_task(room_id: str, task: dict, delay_seconds: float = 0.0) -> dict:
+async def enqueue_task(room_id: str, task: dict, delay_seconds: float = 0.0) -> dict | None:
     redis_client = get_redis_client()
     execute_at = time.time() + max(0.0, float(delay_seconds))
     normalized = _normalize_task(task)
     normalized["room_id"] = normalized.get("room_id") or room_id
+    agent_mode = await get_room_agent_mode(str(normalized["room_id"]))
+    if not can_use_agent_role(agent_mode, str(normalized.get("agent_role") or "")):
+        _agent_log(
+            "agent_enqueue_skipped_by_mode",
+            {
+                "task_id": normalized.get("task_id"),
+                "room_id": normalized.get("room_id"),
+                "agent_role": normalized.get("agent_role"),
+                "agent_mode": agent_mode,
+            },
+        )
+        return None
     _validate_task(normalized)
     qkey = queue_key(room_id)
     _agent_log(

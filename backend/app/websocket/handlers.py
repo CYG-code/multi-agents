@@ -20,6 +20,7 @@ from app.agents.agent_messages import (
     MENTION_STRATEGY,
     MENTION_UNSUPPORTED,
 )
+from app.agents.agent_mode import can_use_agent_role, get_room_agent_mode
 from app.agents.queue import create_mention_entry, enqueue_task
 from app.agents.queue import queue_key
 from app.agents.role_agents import ROLE_AGENTS
@@ -154,6 +155,7 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
     if not cfg.mention.enabled:
         return
 
+    room_mode = await get_room_agent_mode(room_id)
     for role in _normalized_mentions(mentions):
         log_agent_debug(
             "agent_mention_role_start",
@@ -183,6 +185,18 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
             log_agent_debug(
                 "agent_mention_unsupported_broadcast_done",
                 {"room_id": room_id, "source_message_id": source_message_id, "agent_role": role},
+            )
+            continue
+
+        if not can_use_agent_role(room_mode, role):
+            log_agent_debug(
+                "agent_mention_blocked_by_mode",
+                {
+                    "room_id": room_id,
+                    "source_message_id": source_message_id,
+                    "agent_role": role,
+                    "agent_mode": room_mode,
+                },
             )
             continue
 
@@ -264,6 +278,17 @@ async def _trigger_mentions(room_id: str, source_message_id: str, user: User, me
                 "triggered_at": time.time(),
             },
         )
+        if not task:
+            log_agent_debug(
+                "agent_enqueue_skipped_by_mode",
+                {
+                    "room_id": room_id,
+                    "source_message_id": source_message_id,
+                    "agent_role": role,
+                    "agent_mode": room_mode,
+                },
+            )
+            continue
         log_agent_debug(
             "agent_enqueue_done",
             {

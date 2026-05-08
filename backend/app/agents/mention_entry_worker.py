@@ -5,6 +5,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+from app.agents.agent_mode import can_use_agent_role, get_room_agent_mode
 from app.agents.queue import (
     enqueue_task,
     mark_mention_entry_status,
@@ -107,6 +108,24 @@ class MentionEntryWorker:
             )
             return
 
+        room_mode = await get_room_agent_mode(room_id)
+        if not can_use_agent_role(room_mode, agent_role):
+            await mark_mention_entry_status(
+                entry_id,
+                "skipped",
+                reason="blocked_by_agent_mode",
+            )
+            _agent_log(
+                "mention_entry_skipped_by_mode",
+                {
+                    "entry_id": entry_id,
+                    "room_id": room_id,
+                    "agent_role": agent_role,
+                    "agent_mode": room_mode,
+                },
+            )
+            return
+
         try:
             _agent_log(
                 "mention_entry_enqueue_start",
@@ -133,6 +152,22 @@ class MentionEntryWorker:
                     "triggered_at": now_ts,
                 },
             )
+            if not task:
+                await mark_mention_entry_status(
+                    entry_id,
+                    "skipped",
+                    reason="blocked_by_agent_mode",
+                )
+                _agent_log(
+                    "mention_entry_enqueue_skipped_by_mode",
+                    {
+                        "entry_id": entry_id,
+                        "room_id": room_id,
+                        "agent_role": agent_role,
+                        "agent_mode": room_mode,
+                    },
+                )
+                return
             task_id = str(task.get("task_id") or "")
             await mark_mention_entry_status(
                 entry_id,

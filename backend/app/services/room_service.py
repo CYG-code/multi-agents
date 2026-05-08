@@ -15,7 +15,12 @@ DEFAULT_ROOM_TIMER_DURATION_MINUTES = 120
 
 
 async def create_room(db: AsyncSession, data: RoomCreate, user_id: UUID) -> Room:
-    room = Room(name=data.name, task_id=data.task_id, created_by=user_id)
+    room = Room(
+        name=data.name,
+        task_id=data.task_id,
+        created_by=user_id,
+        agent_mode=data.agent_mode or "multi",
+    )
     db.add(room)
     await db.commit()
     await db.refresh(room)

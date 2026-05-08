@@ -2,6 +2,7 @@
 
 import time
 
+from app.agents.agent_mode import get_room_agent_mode, should_run_auto_dispatcher
 from app.agents.agent_messages import MONOPOLY_REASON_TEMPLATE, MONOPOLY_STRATEGY
 from app.agents.queue import enqueue_task
 from app.agents.settings import get_agent_settings
@@ -11,6 +12,10 @@ from app.db.redis_client import get_redis_client
 
 class TriggerDetector:
     async def check_monopoly(self, room_id: str, sender_id: str) -> None:
+        room_mode = await get_room_agent_mode(room_id)
+        if not should_run_auto_dispatcher(room_mode):
+            return
+
         cfg = get_agent_settings()
         auto_speak = getattr(cfg, "auto_speak", None)
         monopoly_encourager_enabled = True if auto_speak is None else getattr(auto_speak, "monopoly_encourager_enabled", True)

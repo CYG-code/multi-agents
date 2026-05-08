@@ -28,3 +28,4 @@ class Room(Base):
     timer_deadline_at = Column(DateTime(timezone=True), nullable=True)
     timer_stopped_at = Column(DateTime(timezone=True), nullable=True)
     locked_member_ids = Column(JSONB, nullable=True)
+    agent_mode = Column(String(20), nullable=False, default="multi", server_default="multi")
