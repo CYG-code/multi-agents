@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # multi-agents ECS local backup script
@@ -360,10 +360,10 @@ if command -v git >/dev/null 2>&1 && [[ -d "${PROJECT_DIR}/.git" ]]; then
   git_commit="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 fi
 
-contains_nginx_config=false
-contains_systemd_config=false
-[[ -f "$WORK_DIR/config/nginx/nginx.conf" ]] && contains_nginx_config=true
-[[ -f "$WORK_DIR/config/systemd/multi-agents-backend.service" ]] && contains_systemd_config=true
+contains_nginx_config=False
+contains_systemd_config=False
+[[ -f "$WORK_DIR/config/nginx/nginx.conf" ]] && contains_nginx_config=True
+[[ -f "$WORK_DIR/config/systemd/multi-agents-backend.service" ]] && contains_systemd_config=True
 
 python3 - <<PY > "${WORK_DIR}/manifest.json"
 import json, datetime, socket
