@@ -41,6 +41,7 @@
     </div>
 
     <ChatInput
+      :agent-mode="currentAgentMode"
       :agent-busy="agentBusy"
       :cooling-roles="coolingRoles"
       :cooldown-until-by-role="cooldownUntilByRole"
@@ -81,6 +82,7 @@ const { connect, on, send, disconnect, connected } = useWebSocket(roomId)
 const { handleTyping, handleStream, handleStreamEnd } = useAgentStream()
 
 const ROLE_NAMES = {
+  socratic: '苏格拉底智能体',
   facilitator: '主持人',
   devil_advocate: '批判者',
   summarizer: '总结者',
@@ -88,6 +90,7 @@ const ROLE_NAMES = {
   encourager: '鼓励者',
   concept_explainer: '概念解释员',
 }
+const currentAgentMode = computed(() => roomStore.currentRoom?.agent_mode || 'multi')
 
 const invokeStatusList = computed(() => {
   return Array.from(invokeStatusMap.value.values())

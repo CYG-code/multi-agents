@@ -15,7 +15,7 @@
     </div>
 
     <div class="flex items-end gap-2">
-      <div class="relative">
+      <div v-if="availableAgentOptions.length > 0" class="relative">
         <button
           type="button"
           class="rounded-xl border border-gray-300 px-3 py-2 text-sm transition-colors hover:bg-gray-50"
@@ -30,7 +30,7 @@
         >
           <p class="px-2 py-1 text-xs text-gray-500">选择智能体</p>
           <button
-            v-for="agent in AGENT_OPTIONS"
+            v-for="agent in availableAgentOptions"
             :key="agent.role"
             type="button"
             class="w-full rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100"
@@ -60,9 +60,13 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
+  agentMode: {
+    type: String,
+    default: 'multi',
+  },
   agentBusy: {
     type: Boolean,
     default: false,
@@ -80,6 +84,7 @@ const props = defineProps({
 const emit = defineEmits(['send'])
 
 const AGENT_OPTIONS = [
+  { role: 'socratic', label: '苏格拉底智能体' },
   { role: 'facilitator', label: '主持人' },
   { role: 'devil_advocate', label: '批判者' },
   { role: 'summarizer', label: '总结者' },
@@ -87,10 +92,27 @@ const AGENT_OPTIONS = [
   { role: 'encourager', label: '鼓励者' },
   { role: 'concept_explainer', label: '概念解释员' },
 ]
+const MULTI_AGENT_ROLES = [
+  'facilitator',
+  'devil_advocate',
+  'summarizer',
+  'resource_finder',
+  'encourager',
+  'concept_explainer',
+]
 
 const inputText = ref('')
 const selectedMentions = ref([])
 const showMentionPanel = ref(false)
+
+const availableAgentOptions = computed(() => {
+  const mode = String(props.agentMode || 'multi').toLowerCase()
+  if (mode === 'none') return []
+  if (mode === 'single') return AGENT_OPTIONS.filter((item) => item.role === 'socratic')
+  return AGENT_OPTIONS.filter((item) => MULTI_AGENT_ROLES.includes(item.role))
+})
+
+const availableRoles = computed(() => availableAgentOptions.value.map((item) => item.role))
 
 function roleLabel(role) {
   const found = AGENT_OPTIONS.find((it) => it.role === role)
@@ -98,10 +120,12 @@ function roleLabel(role) {
 }
 
 function toggleMentionPanel() {
+  if (availableAgentOptions.value.length === 0) return
   showMentionPanel.value = !showMentionPanel.value
 }
 
 function toggleMention(role) {
+  if (!availableRoles.value.includes(role)) return
   if (selectedMentions.value.includes(role)) {
     selectedMentions.value = selectedMentions.value.filter((item) => item !== role)
   } else {
@@ -124,9 +148,10 @@ function handleKeydown(event) {
 function sendMessage() {
   const content = inputText.value.trim()
   if (!content) return
+  const normalizedMentions = selectedMentions.value.filter((role) => availableRoles.value.includes(role))
 
   const now = Date.now()
-  const coolingRole = selectedMentions.value.find((role) => {
+  const coolingRole = normalizedMentions.find((role) => {
     const until = Number(props.cooldownUntilByRole?.[role] || 0)
     return Number.isFinite(until) && until > now
   })
@@ -137,14 +162,24 @@ function sendMessage() {
     return
   }
 
-  if (props.agentBusy && selectedMentions.value.length > 0) {
+  if (props.agentBusy && normalizedMentions.length > 0) {
     window.alert('An agent is still busy, please try again in a moment.')
     return
   }
 
-  emit('send', content, selectedMentions.value)
+  emit('send', content, normalizedMentions)
   inputText.value = ''
   selectedMentions.value = []
   showMentionPanel.value = false
 }
+
+watch(
+  () => props.agentMode,
+  () => {
+    selectedMentions.value = selectedMentions.value.filter((role) => availableRoles.value.includes(role))
+    if (availableAgentOptions.value.length === 0) {
+      showMentionPanel.value = false
+    }
+  }
+)
 </script>
