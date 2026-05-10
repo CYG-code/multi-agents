@@ -10,7 +10,17 @@ from app.websocket.handlers import handle_chat_message
 async def test_handle_chat_message_broadcasts(monkeypatch):
     calls = {"saved": False, "broadcast": False}
 
-    async def _mock_save(_db, _room_id, _user_id, content, _mentions):
+    async def _mock_save(
+        _db,
+        _room_id,
+        _user_id,
+        content,
+        _mentions,
+        connection_id=None,
+        loadmsg_id=None,
+        **_kwargs,
+    ):
+        _ = connection_id, loadmsg_id
         calls["saved"] = True
 
         class _Msg:

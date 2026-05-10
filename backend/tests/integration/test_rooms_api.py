@@ -1,4 +1,4 @@
-import uuid
+﻿import uuid
 
 from app.models.room import Room, RoomStatus
 
@@ -9,6 +9,7 @@ def test_list_rooms(client, monkeypatch):
         name="讨论室A",
         created_by=uuid.uuid4(),
         status=RoomStatus.waiting,
+        agent_mode="multi",
     )
 
     async def _mock_get_rooms(_db, _status=None):
@@ -35,6 +36,7 @@ def test_create_room(client, monkeypatch):
         name="新房间",
         created_by=uuid.uuid4(),
         status=RoomStatus.waiting,
+        agent_mode="multi",
     )
 
     async def _mock_create_room(_db, data, _user_id):
@@ -56,6 +58,7 @@ def test_delete_room_requires_confirm_name(client, monkeypatch):
         name="确认房间",
         created_by=uuid.uuid4(),
         status=RoomStatus.waiting,
+        agent_mode="multi",
     )
 
     async def _mock_get_room(_db, _room_id):
@@ -80,6 +83,7 @@ def test_delete_room_success(client, monkeypatch):
         name="确认房间",
         created_by=uuid.uuid4(),
         status=RoomStatus.waiting,
+        agent_mode="multi",
     )
     deleted = {"called": False}
 

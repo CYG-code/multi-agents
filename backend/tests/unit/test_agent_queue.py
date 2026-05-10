@@ -53,20 +53,26 @@ class _FakeRedis:
 async def test_enqueue_and_dequeue_orders_by_priority_then_time(monkeypatch):
     fake_redis = _FakeRedis()
     monkeypatch.setattr(agent_queue, "get_redis_client", lambda: fake_redis)
+    async def _mode_multi(_room_id):
+        return "multi"
+    monkeypatch.setattr(agent_queue, "get_room_agent_mode", _mode_multi)
 
-    await agent_queue.enqueue_task("r1", {"agent_role": "a", "priority": 2, "triggered_at": 2}, delay_seconds=0)
-    await agent_queue.enqueue_task("r1", {"agent_role": "b", "priority": 0, "triggered_at": 3}, delay_seconds=0)
-    await agent_queue.enqueue_task("r1", {"agent_role": "c", "priority": 0, "triggered_at": 1}, delay_seconds=0)
+    await agent_queue.enqueue_task("r1", {"agent_role": "facilitator", "priority": 2, "triggered_at": 2}, delay_seconds=0)
+    await agent_queue.enqueue_task("r1", {"agent_role": "summarizer", "priority": 0, "triggered_at": 3}, delay_seconds=0)
+    await agent_queue.enqueue_task("r1", {"agent_role": "encourager", "priority": 0, "triggered_at": 1}, delay_seconds=0)
 
     tasks = await agent_queue.dequeue_tasks("r1")
 
-    assert [t["agent_role"] for t in tasks] == ["c", "b", "a"]
+    assert [t["agent_role"] for t in tasks] == ["encourager", "summarizer", "facilitator"]
 
 
 @pytest.mark.asyncio
 async def test_enqueue_writes_queued_task_status(monkeypatch):
     fake_redis = _FakeRedis()
     monkeypatch.setattr(agent_queue, "get_redis_client", lambda: fake_redis)
+    async def _mode_multi(_room_id):
+        return "multi"
+    monkeypatch.setattr(agent_queue, "get_room_agent_mode", _mode_multi)
 
     task = await agent_queue.enqueue_task(
         "room-status",
@@ -95,6 +101,9 @@ async def test_enqueue_writes_queued_task_status(monkeypatch):
 async def test_enqueue_silence_broadcasts_agent_queued(monkeypatch):
     fake_redis = _FakeRedis()
     monkeypatch.setattr(agent_queue, "get_redis_client", lambda: fake_redis)
+    async def _mode_multi(_room_id):
+        return "multi"
+    monkeypatch.setattr(agent_queue, "get_room_agent_mode", _mode_multi)
 
     task = await agent_queue.enqueue_task(
         "room-auto-1",

@@ -17,9 +17,14 @@ class _FakeRedisQueue:
         self.hset_calls = []
         self.expire_calls = []
         self.publish_calls = []
+        self.values = {}
+        self.zsets = {}
 
     async def zadd(self, key, mapping):
         self.zadd_calls.append((key, mapping))
+        bucket = self.zsets.setdefault(key, [])
+        for raw, score in mapping.items():
+            bucket.append((float(score), raw))
 
     async def hset(self, key, mapping):
         self.hset_calls.append((key, dict(mapping)))
@@ -31,7 +36,43 @@ class _FakeRedisQueue:
         self.publish_calls.append((channel, message))
 
     async def zcard(self, _key):
-        return 0
+        return len(self.zsets.get(_key, []))
+
+    async def zrange(self, key, start, end, withscores=False):
+        items = sorted(self.zsets.get(key, []), key=lambda x: x[0])
+        if end == -1:
+            sliced = items[start:]
+        else:
+            sliced = items[start : end + 1]
+        if withscores:
+            return [(raw, score) for score, raw in sliced]
+        return [raw for score, raw in sliced]
+
+    async def zrangebyscore(self, key, min=0, max=0):  # noqa: A002
+        result = []
+        for score, raw in self.zsets.get(key, []):
+            if float(min) <= score <= float(max):
+                result.append(raw)
+        return result
+
+    async def zrem(self, key, *members):
+        member_set = set(members)
+        self.zsets[key] = [(s, r) for (s, r) in self.zsets.get(key, []) if r not in member_set]
+
+    async def set(self, key, value, nx=False, ex=None):
+        _ = ex
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def delete(self, key):
+        existed = key in self.values
+        self.values.pop(key, None)
+        return 1 if existed else 0
 
 
 class _FakeRedisWorker:

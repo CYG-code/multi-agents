@@ -12,6 +12,7 @@ class _FakeRedis:
     def __init__(self):
         self.store = {}
         self.zsets = {}
+        self.hashes = {}
         self.sets = {}
         self.published = []
 
@@ -30,6 +31,9 @@ class _FakeRedis:
         to_remove = set(members)
         self.zsets[key] = [(s, m) for s, m in bucket if m not in to_remove]
 
+    async def zcard(self, key):
+        return len(self.zsets.get(key, []))
+
     async def set(self, key, value, nx=False, ex=None):
         _ = ex
         if nx and key in self.store:
@@ -46,6 +50,12 @@ class _FakeRedis:
     async def setex(self, key, ttl, value):
         _ = ttl
         self.store[key] = value
+
+    async def hset(self, key, mapping):
+        self.hashes[key] = {str(k): str(v) for k, v in mapping.items()}
+
+    async def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
 
     async def incr(self, key):
         v = int(self.store.get(key, 0)) + 1
@@ -94,6 +104,9 @@ class _MentionCfg:
 class _HandlersCfg:
     mention = _MentionCfg()
 
+    class timing:
+        mention_entry_enabled = False
+
 
 class _DummyAgent:
     def __init__(self, redis_client):
@@ -111,14 +124,21 @@ class _DummyAgent:
         await self.redis.publish(f"room:{kwargs['room_id']}", json.dumps(payload, ensure_ascii=False))
 
 
+async def _mode_multi(_room_id):
+    return "multi"
+
+
 @pytest.mark.asyncio
 async def test_committee_to_worker_to_agent_publish_chain(monkeypatch):
     fake_redis = _FakeRedis()
     room_id = "room-chain-1"
 
     monkeypatch.setattr("app.agents.queue.get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr("app.agents.queue.get_room_agent_mode", _mode_multi)
     monkeypatch.setattr(committee, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(committee, "get_room_agent_mode", _mode_multi)
     monkeypatch.setattr(agent_worker, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(agent_worker, "get_room_agent_mode", _mode_multi)
 
     async def _msgs(_room_id, limit=50):
         _ = limit
@@ -214,8 +234,11 @@ async def test_mention_to_queue_to_worker_to_agent_publish_chain(monkeypatch):
     source_message_id = "msg-123"
 
     monkeypatch.setattr("app.agents.queue.get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr("app.agents.queue.get_room_agent_mode", _mode_multi)
     monkeypatch.setattr(agent_worker, "get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(agent_worker, "get_room_agent_mode", _mode_multi)
     monkeypatch.setattr(handlers, "get_agent_settings", lambda: _HandlersCfg())
+    monkeypatch.setattr(handlers, "get_room_agent_mode", _mode_multi)
     monkeypatch.setattr(handlers, "ROLE_AGENTS", {"encourager": object()})
 
     class _Manager:

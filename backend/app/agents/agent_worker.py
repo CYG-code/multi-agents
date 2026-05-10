@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 
 from app.agents.agent_mode import can_use_agent_role, get_room_agent_mode
 from app.agents.context_builder import get_recent_messages, get_room_context
-from app.agents.queue import dequeue_tasks, requeue_task, set_task_status
+from app.agents.queue import (
+    dequeue_tasks,
+    followup_task_key,
+    requeue_task,
+    running_task_key,
+    set_task_status,
+)
 from app.agents.role_agents import ROLE_AGENTS
 from app.agents.settings import get_agent_settings
 from app.agents.trigger_policy import is_user_trigger
@@ -284,6 +290,16 @@ class AgentWorker:
             source_message_id=source_message_id,
             running_at=datetime.now(timezone.utc).isoformat(),
         )
+        if room_mode == "single" and agent_role == "socratic":
+            await redis_client.setex(
+                running_task_key(room_id, agent_role),
+                LOCK_TTL_SECONDS * 10,
+                task_id,
+            )
+            socratic_followup_key = followup_task_key(room_id, agent_role)
+            pending_followup_task_id = await redis_client.get(socratic_followup_key)
+            if pending_followup_task_id and str(pending_followup_task_id) == task_id:
+                await redis_client.delete(socratic_followup_key)
         await self._publish_task_state_event(
             room_id=room_id,
             task_id=task_id,
@@ -431,6 +447,10 @@ class AgentWorker:
             if current_lock == WORKER_ID:
                 await redis_client.delete(lock_key)
                 _agent_log("agent_lock_release", {"task_id": task_id, "room_id": room_id, "lock_key": lock_key})
+            if room_mode == "single" and agent_role == "socratic":
+                current_running_id = await redis_client.get(running_task_key(room_id, agent_role))
+                if current_running_id and str(current_running_id) == task_id:
+                    await redis_client.delete(running_task_key(room_id, agent_role))
 
     async def _publish_queue_dropped(
         self,

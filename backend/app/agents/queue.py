@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
 import uuid
 from datetime import datetime, timezone
 
-from app.agents.agent_mode import can_use_agent_role, get_room_agent_mode
+from app.agents.agent_mode import (
+    AGENT_MODE_SINGLE,
+    can_use_agent_role,
+    get_room_agent_mode,
+)
 from app.db.redis_client import get_redis_client
 
 QUEUE_KEY_PREFIX = "agent_queue"
@@ -16,6 +21,11 @@ MENTION_ENTRY_QUEUE_KEY = "agent:mention_entry_queue"
 MENTION_ENTRY_KEY_PREFIX = "agent:mention_entry"
 MENTION_ENTRY_STATUS_KEY_PREFIX = "agent:mention_entry_status"
 MENTION_ENTRY_TTL_SECONDS = 24 * 60 * 60
+RUNNING_TASK_KEY_PREFIX = "agent:running"
+FOLLOWUP_TASK_KEY_PREFIX = "agent:followup"
+COALESCE_LOCK_KEY_PREFIX = "agent:coalesce-lock"
+COALESCE_LOCK_TTL_SECONDS = 3
+MAX_COALESCED_SOURCE_MESSAGE_IDS = 50
 AGENT_DEBUG_LOG = os.getenv("AGENT_DEBUG_LOG", "").lower() == "true"
 
 
@@ -46,6 +56,18 @@ def mention_entry_key(entry_id: str) -> str:
 
 def mention_entry_status_key(entry_id: str) -> str:
     return f"{MENTION_ENTRY_STATUS_KEY_PREFIX}:{entry_id}"
+
+
+def running_task_key(room_id: str, agent_role: str) -> str:
+    return f"{RUNNING_TASK_KEY_PREFIX}:{room_id}:{agent_role}"
+
+
+def followup_task_key(room_id: str, agent_role: str) -> str:
+    return f"{FOLLOWUP_TASK_KEY_PREFIX}:{room_id}:{agent_role}"
+
+
+def coalesce_lock_key(room_id: str, agent_role: str) -> str:
+    return f"{COALESCE_LOCK_KEY_PREFIX}:{room_id}:{agent_role}"
 
 
 def _normalize_task(task: dict) -> dict:
@@ -82,6 +104,92 @@ def _validate_task(task: dict) -> None:
         raise ValueError(f"agent task missing required fields: {missing}")
 
 
+def _merge_source_message_ids(task: dict, incoming_source_message_id: str | None) -> list[str]:
+    merged_ids: list[str] = []
+    existing = task.get("source_message_ids")
+    if isinstance(existing, list):
+        merged_ids.extend(str(x) for x in existing if x)
+    elif isinstance(existing, str) and existing:
+        merged_ids.append(existing)
+
+    current_primary = str(task.get("source_message_id") or "")
+    if current_primary and not merged_ids:
+        merged_ids.append(current_primary)
+
+    incoming = str(incoming_source_message_id or "")
+    if incoming and incoming not in merged_ids:
+        merged_ids.append(incoming)
+    if len(merged_ids) > MAX_COALESCED_SOURCE_MESSAGE_IDS:
+        merged_ids = merged_ids[-MAX_COALESCED_SOURCE_MESSAGE_IDS:]
+    return merged_ids
+
+
+async def _read_room_queue_entries(redis_client, room_id: str) -> list[tuple[float, str, dict]]:
+    qkey = queue_key(room_id)
+    entries_with_scores: list[tuple[str, float]] = []
+    try:
+        scored = await redis_client.zrange(qkey, 0, -1, withscores=True)
+        entries_with_scores = [(str(raw), float(score)) for raw, score in (scored or [])]
+    except Exception:
+        raw_entries = await redis_client.zrangebyscore(qkey, min=0, max=float("inf"))
+        entries_with_scores = [(str(raw), time.time()) for raw in (raw_entries or [])]
+
+    parsed: list[tuple[float, str, dict]] = []
+    for raw, score in entries_with_scores:
+        try:
+            task_data = json.loads(raw)
+            parsed.append((float(score), raw, task_data))
+        except Exception:
+            continue
+    return parsed
+
+
+async def _coalesce_into_existing_task(
+    *,
+    redis_client,
+    room_id: str,
+    existing_score: float,
+    existing_raw: str,
+    existing_task: dict,
+    incoming_task: dict,
+) -> dict:
+    qkey = queue_key(room_id)
+    merged_task = dict(existing_task)
+    merged_task["merged_count"] = int(existing_task.get("merged_count") or 1) + 1
+    merged_task["latest_message_id"] = str(incoming_task.get("source_message_id") or "")
+    merged_task["source_message_ids"] = _merge_source_message_ids(
+        merged_task,
+        incoming_task.get("source_message_id"),
+    )
+    total_merged = int(merged_task.get("merged_count") or 1)
+    retained_count = len(merged_task.get("source_message_ids") or [])
+    dropped_count = max(0, total_merged - retained_count)
+    merged_task["truncated_source_message_ids"] = dropped_count > 0
+    merged_task["dropped_source_message_count"] = dropped_count
+    merged_task["triggered_at"] = float(existing_task.get("triggered_at") or incoming_task.get("triggered_at") or time.time())
+
+    await redis_client.zrem(qkey, existing_raw)
+    await redis_client.zadd(qkey, {json.dumps(merged_task, ensure_ascii=False, sort_keys=True): existing_score})
+    await update_task_status_fields(
+        str(merged_task.get("task_id") or ""),
+        merged_count=str(merged_task.get("merged_count")),
+        latest_message_id=str(merged_task.get("latest_message_id") or ""),
+        source_message_ids=json.dumps(merged_task.get("source_message_ids") or [], ensure_ascii=False),
+        truncated_source_message_ids=str(bool(merged_task.get("truncated_source_message_ids"))),
+        dropped_source_message_count=str(int(merged_task.get("dropped_source_message_count") or 0)),
+    )
+    _agent_log(
+        "single_socratic_task_coalesced",
+        {
+            "room_id": room_id,
+            "task_id": merged_task.get("task_id"),
+            "merged_count": merged_task.get("merged_count"),
+            "latest_message_id": merged_task.get("latest_message_id"),
+        },
+    )
+    return merged_task
+
+
 async def enqueue_task(room_id: str, task: dict, delay_seconds: float = 0.0) -> dict | None:
     redis_client = get_redis_client()
     execute_at = time.time() + max(0.0, float(delay_seconds))
@@ -99,6 +207,79 @@ async def enqueue_task(room_id: str, task: dict, delay_seconds: float = 0.0) -> 
             },
         )
         return None
+
+    role = str(normalized.get("agent_role") or "").strip().lower()
+    coalesce_owner: str | None = None
+    coalesce_key: str | None = None
+    if agent_mode == AGENT_MODE_SINGLE and role == "socratic":
+        coalesce_key = coalesce_lock_key(room_id, role)
+        coalesce_owner = str(uuid.uuid4())
+        acquired = await redis_client.set(
+            coalesce_key,
+            coalesce_owner,
+            nx=True,
+            ex=COALESCE_LOCK_TTL_SECONDS,
+        )
+        attempts = 0
+        while not acquired and attempts < 20:
+            attempts += 1
+            await asyncio.sleep(0.01)
+            acquired = await redis_client.set(
+                coalesce_key,
+                coalesce_owner,
+                nx=True,
+                ex=COALESCE_LOCK_TTL_SECONDS,
+            )
+        if not acquired:
+            _agent_log(
+                "single_socratic_coalesce_lock_busy",
+                {"room_id": room_id, "agent_role": role, "attempts": attempts},
+            )
+            # Fail closed for this enqueue to avoid duplicate task creation under contention.
+            return None
+
+        try:
+            queue_entries = await _read_room_queue_entries(redis_client, room_id)
+            queued_socratic = [
+                (score, raw, queued_task)
+                for score, raw, queued_task in queue_entries
+                if str(queued_task.get("agent_role") or "").strip().lower() == "socratic"
+            ]
+            if queued_socratic:
+                queued_socratic.sort(key=lambda item: float(item[2].get("triggered_at") or 0))
+                score, raw, queued_task = queued_socratic[0]
+                return await _coalesce_into_existing_task(
+                    redis_client=redis_client,
+                    room_id=room_id,
+                    existing_score=score,
+                    existing_raw=raw,
+                    existing_task=queued_task,
+                    incoming_task=normalized,
+                )
+
+            running_key = running_task_key(room_id, "socratic")
+            followup_key = followup_task_key(room_id, "socratic")
+            running_task_id = await redis_client.get(running_key)
+            if running_task_id:
+                followup_task_id = await redis_client.get(followup_key)
+                if followup_task_id:
+                    for score, raw, queued_task in queue_entries:
+                        if str(queued_task.get("task_id") or "") == str(followup_task_id):
+                            return await _coalesce_into_existing_task(
+                                redis_client=redis_client,
+                                room_id=room_id,
+                                existing_score=score,
+                                existing_raw=raw,
+                                existing_task=queued_task,
+                                incoming_task=normalized,
+                            )
+                    await redis_client.delete(followup_key)
+        finally:
+            if coalesce_key and coalesce_owner:
+                current_owner = await redis_client.get(coalesce_key)
+                if str(current_owner or "") == coalesce_owner:
+                    await redis_client.delete(coalesce_key)
+
     _validate_task(normalized)
     qkey = queue_key(room_id)
     _agent_log(
@@ -117,6 +298,14 @@ async def enqueue_task(room_id: str, task: dict, delay_seconds: float = 0.0) -> 
     )
     task_json = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
     await redis_client.zadd(qkey, {task_json: execute_at})
+    if agent_mode == AGENT_MODE_SINGLE and role == "socratic":
+        running_key = running_task_key(room_id, "socratic")
+        if await redis_client.get(running_key):
+            await redis_client.setex(
+                followup_task_key(room_id, "socratic"),
+                TASK_STATUS_TTL_SECONDS,
+                str(normalized.get("task_id") or ""),
+            )
     await set_task_status(
         task_id=str(normalized.get("task_id")),
         room_id=room_id,
@@ -167,6 +356,8 @@ async def enqueue_task(room_id: str, task: dict, delay_seconds: float = 0.0) -> 
         },
     )
     return normalized
+
+
 
 
 async def dequeue_tasks(room_id: str) -> list[dict]:
